@@ -52,20 +52,24 @@ pub enum PermissionKind {
 // Accessibility — `AXIsProcessTrusted` from ApplicationServices.
 // ----------------------------------------------------------------------
 
+// `AXIsProcessTrusted` returns Apple's `Boolean`, which is a `typedef
+// unsigned char` (any value 0..=255 is legal). Rust's `bool` requires
+// exactly 0 or 1, so binding the FFI return as `bool` is undefined
+// behaviour even though the symbol always returns 0/1 in practice.
+// We bind as `u8` and compare to zero at the call site.
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
-    fn AXIsProcessTrusted() -> bool;
+    fn AXIsProcessTrusted() -> u8;
 }
 
-/// Real probe: `AXIsProcessTrusted` returns true once the user has added
-/// the wispertype binary to System Settings → Privacy & Security →
-/// Accessibility. The OS distinguishes "denied" from "never asked" only
-/// for the *first* check after a fresh install — afterwards both look
-/// identical from a process's perspective. We collapse them into
-/// `NotRequested` so the UI surfaces the same "open settings" CTA.
+/// Real probe: `AXIsProcessTrusted` is `true` once the user has added the
+/// wispertype binary to System Settings → Privacy & Security →
+/// Accessibility. AX only reports trusted vs not-trusted — it never
+/// distinguishes "denied" from "never asked" — so we collapse not-trusted
+/// into `NotRequested` to surface a single "open settings" CTA.
 pub fn check_accessibility() -> PermissionState {
     // SAFETY: Pure C call, no pointers exchanged, no shared mutable state.
-    let trusted = unsafe { AXIsProcessTrusted() };
+    let trusted = unsafe { AXIsProcessTrusted() } != 0;
     if trusted {
         PermissionState::Granted
     } else {
