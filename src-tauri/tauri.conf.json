@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "wispertype",
+  "productName": "DictateFlow",
   "version": "0.1.0",
-  "identifier": "com.wispertype.app",
+  "identifier": "com.dictateflow.app",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -15,7 +15,7 @@
     "windows": [
       {
         "label": "settings",
-        "title": "wispertype",
+        "title": "DictateFlow",
         "url": "index.html",
         "width": 720,
         "height": 640,
@@ -29,10 +29,10 @@
       },
       {
         "label": "pill",
-        "title": "wispertype-pill",
+        "title": "dictateflow-pill",
         "url": "pill.html",
-        "width": 280,
-        "height": 56,
+        "width": 80,
+        "height": 44,
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": true,

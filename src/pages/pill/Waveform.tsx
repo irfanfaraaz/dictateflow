@@ -1,57 +1,34 @@
 import { useEffect, useRef } from "react";
 
-const BAR_COUNT = 12;
-const BAR_WIDTH = 2;
-const BAR_GAP = 4;
-const MIN_BAR_HEIGHT = 3;
-const MAX_BAR_HEIGHT = 28;
-// Read from CSS custom properties defined in tokens.css so there is a single
-// source of truth for these values (tailwind.config.ts + tokens.css).
-const BAR_COLOR = "var(--accent)";
-const BAR_COLOR_WARN = "var(--accent-warn)";
-// Per-frame easing factor for the bar-height interpolation. Lower = smoother
-// (more visual lag), higher = snappier. 0.25 lands close to a 60 Hz spring
-// without the cost of a real solver.
-const EASING = 0.25;
+const BAR_COUNT = 5;
+const BAR_WIDTH = 3;
+const BAR_GAP = 3;
+const MIN_BAR_HEIGHT = 4;
+const MAX_BAR_HEIGHT = 24;
+const EASING = 0.3;
 
-interface WaveformProps {
-  /** Current RMS amplitude in [0, ~1]. */
-  level: number;
-  /** When true, render a static red dot instead of bars. */
-  reducedMotion?: boolean;
-  /** When true (≥80% of cap), brighten the waveform to signal urgency. */
-  warn?: boolean;
+function resolveColor(prop: string): string {
+  return getComputedStyle(document.documentElement).getPropertyValue(prop).trim() || "#ffffff";
 }
 
-/**
- * Animated waveform: 12 vertical bars whose heights interpolate toward a
- * shared target derived from the latest `level`. The target is shaped via a
- * sqrt curve so quiet input still moves the bars visibly, then jittered per
- * bar so the result reads as "audio energy" instead of "pulse."
- *
- * We draw to a `<canvas>` rather than 12 styled divs because a single rAF
- * loop is cheaper (and stays inside the GPU compositor) than 12 React
- * style updates per frame.
- */
-export function Waveform({ level, reducedMotion = false, warn = false }: WaveformProps) {
+interface WaveformProps {
+  level: number;
+  reducedMotion?: boolean;
+}
+
+export function Waveform({ level, reducedMotion = false }: WaveformProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const heightsRef = useRef<Float32Array>(new Float32Array(BAR_COUNT));
   const targetsRef = useRef<Float32Array>(new Float32Array(BAR_COUNT));
   const levelRef = useRef<number>(level);
-  const warnRef = useRef<boolean>(warn);
   const rafRef = useRef<number | null>(null);
 
-  // Push the latest level + warn flag into refs so the rAF loop can read
-  // them without re-subscribing every render.
   useEffect(() => {
     levelRef.current = level;
   }, [level]);
-  useEffect(() => {
-    warnRef.current = warn;
-  }, [warn]);
 
   useEffect(() => {
-    if (reducedMotion) return; // static dot path
+    if (reducedMotion) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
@@ -66,18 +43,18 @@ export function Waveform({ level, reducedMotion = false, warn = false }: Wavefor
     canvas.style.height = `${height}px`;
     ctx.scale(dpr, dpr);
 
+    const color = resolveColor("--accent");
+
     const tick = () => {
       const lvl = Math.max(0, Math.min(1, levelRef.current));
-      // sqrt curve: small lvl values still produce visible heights.
       const shaped = Math.sqrt(lvl);
       const targets = targetsRef.current;
       for (let i = 0; i < BAR_COUNT; i += 1) {
-        // Per-bar jitter so the waveform doesn't look like one big bar.
-        // Use a deterministic phase offset so reduced-anxiety viewers
-        // still see a coherent shape, not noise.
+        const center = (BAR_COUNT - 1) / 2;
+        const dist = 1 - Math.abs(i - center) / center;
         const phase = (i / BAR_COUNT) * Math.PI * 2;
-        const j = 0.6 + 0.4 * Math.abs(Math.sin(phase + performance.now() / 220));
-        targets[i] = MIN_BAR_HEIGHT + shaped * j * (MAX_BAR_HEIGHT - MIN_BAR_HEIGHT);
+        const j = 0.5 + 0.5 * Math.abs(Math.sin(phase + performance.now() / 180));
+        targets[i] = MIN_BAR_HEIGHT + shaped * j * dist * (MAX_BAR_HEIGHT - MIN_BAR_HEIGHT);
       }
 
       const heights = heightsRef.current;
@@ -86,12 +63,16 @@ export function Waveform({ level, reducedMotion = false, warn = false }: Wavefor
       }
 
       ctx.clearRect(0, 0, width, height);
-      ctx.fillStyle = warnRef.current ? BAR_COLOR_WARN : BAR_COLOR;
+      ctx.fillStyle = color;
       for (let i = 0; i < BAR_COUNT; i += 1) {
         const h = Math.max(MIN_BAR_HEIGHT, heights[i]);
+        const w = BAR_WIDTH;
         const x = i * (BAR_WIDTH + BAR_GAP);
         const y = (height - h) / 2;
-        ctx.fillRect(x, y, BAR_WIDTH, h);
+        const r = w / 2;
+        ctx.beginPath();
+        ctx.roundRect(x, y, w, h, r);
+        ctx.fill();
       }
       rafRef.current = requestAnimationFrame(tick);
     };
@@ -106,8 +87,7 @@ export function Waveform({ level, reducedMotion = false, warn = false }: Wavefor
     return (
       <span
         aria-hidden="true"
-        className="inline-block h-2 w-2 rounded-full"
-        style={{ background: warn ? BAR_COLOR_WARN : BAR_COLOR }}
+        className="inline-block h-2 w-2 rounded-full bg-white"
       />
     );
   }

@@ -21,8 +21,8 @@
 
 use anyhow::{anyhow, Context, Result};
 use objc2::rc::Retained;
-use objc2_app_kit::{NSEvent, NSScreen, NSWindow};
-use objc2_foundation::{MainThreadMarker, NSPoint};
+use objc2_app_kit::{NSScreen, NSWindow};
+use objc2_foundation::MainThreadMarker;
 use tauri::{AppHandle, LogicalPosition, Manager, PhysicalPosition, Runtime, WebviewWindow};
 use tracing::warn;
 
@@ -30,16 +30,12 @@ use tracing::warn;
 pub const PILL_LABEL: &str = "pill";
 
 /// Width of the pill window in logical pixels (matches tauri.conf.json).
-pub const PILL_WIDTH: f64 = 280.0;
+pub const PILL_WIDTH: f64 = 80.0;
 /// Height of the pill window in logical pixels (matches tauri.conf.json).
-pub const PILL_HEIGHT: f64 = 56.0;
+pub const PILL_HEIGHT: f64 = 44.0;
 
-/// Offset (logical px) below-and-right of the cursor where the pill anchors.
-const CURSOR_OFFSET: f64 = 12.0;
-
-/// Approximate height of the macOS menu bar (logical px). Used to detect when
-/// the cursor is over the menu bar so we can fall back to bottom-center.
-const MENU_BAR_HEIGHT: f64 = 24.0;
+/// Distance from the bottom edge of the screen (logical px).
+const BOTTOM_MARGIN: f64 = 32.0;
 
 /// Apply `setIgnoresMouseEvents:true` to the pill window so clicks pass
 /// through to whatever's underneath it. MUST be called on the main thread.
@@ -102,51 +98,19 @@ pub fn hide<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
     Ok(())
 }
 
-/// Read cursor location and primary-screen frame, then compute the pill's
-/// top-left position in Tauri logical coordinates. Falls back to bottom-
-/// center of the primary display if the cursor is over the menu bar or the
-/// AppKit calls fail to produce a usable point.
+/// Position the pill at bottom-center of the primary display (Wispr Flow style).
 fn compute_pill_position() -> Result<tauri::Position> {
-    // SAFETY: NSEvent::mouseLocation and NSScreen::mainScreen must be called
-    // on the main thread. The caller guarantees this (we're invoked from
-    // run_on_main_thread).
     let mtm = MainThreadMarker::new()
         .ok_or_else(|| anyhow!("compute_pill_position called off main thread"))?;
 
-    let cursor: NSPoint = unsafe { NSEvent::mouseLocation() };
     let screen: Option<Retained<NSScreen>> = NSScreen::mainScreen(mtm);
     let screen = screen.ok_or_else(|| anyhow!("no main screen"))?;
     let screen_frame = screen.frame();
     let screen_height = screen_frame.size.height;
     let screen_width = screen_frame.size.width;
 
-    // Convert AppKit (bottom-left) → Tauri (top-left). Anchor pill's
-    // top-left at (cursor_x + offset, screen_height - cursor_y + offset).
-    let mut x = cursor.x + CURSOR_OFFSET;
-    let mut y = screen_height - cursor.y + CURSOR_OFFSET;
-
-    // Fallback: cursor over menu bar / off-screen → bottom-center.
-    let cursor_in_menu_bar = cursor.y > screen_height - MENU_BAR_HEIGHT;
-    let cursor_off_screen =
-        cursor.x < 0.0 || cursor.y < 0.0 || cursor.x > screen_width || cursor.y > screen_height;
-    if cursor_in_menu_bar || cursor_off_screen {
-        x = (screen_width - PILL_WIDTH) / 2.0;
-        y = screen_height - PILL_HEIGHT - 80.0; // 80 px above the bottom edge
-    } else {
-        // Clamp so the pill stays fully on-screen.
-        if x + PILL_WIDTH > screen_width {
-            x = screen_width - PILL_WIDTH - 8.0;
-        }
-        if y + PILL_HEIGHT > screen_height {
-            y = screen_height - PILL_HEIGHT - 8.0;
-        }
-        if x < 0.0 {
-            x = 8.0;
-        }
-        if y < 0.0 {
-            y = 8.0;
-        }
-    }
+    let x = (screen_width - PILL_WIDTH) / 2.0;
+    let y = screen_height - PILL_HEIGHT - BOTTOM_MARGIN;
 
     Ok(tauri::Position::Logical(LogicalPosition::new(x, y)))
 }
