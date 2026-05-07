@@ -1,0 +1,22 @@
+//! Global hotkey listener.
+//!
+//! Web analogue: a global hotkey is like an `addEventListener('keydown')` on
+//! `window`, except "window" is the entire OS — the keypress fires regardless
+//! of which app is focused. This is the load-bearing feature for hold-to-talk:
+//! the user is in Slack, holds F5, and we catch it.
+//!
+//! On macOS this requires the *Input Monitoring* permission (and silently
+//! fails until granted — the plugin doesn't surface a permission error).
+//! See `permissions::check_input_monitoring`.
+
+#![allow(dead_code)] // wired into AppState in Task 1.6
+
+pub mod listener;
+
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum HotkeyError {
+    #[error("failed to register global shortcut: {0}")]
+    Register(String),
+}
