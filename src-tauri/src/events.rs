@@ -202,8 +202,13 @@ pub async fn start_dictation<R: Runtime>(app: &AppHandle<R>) -> Result<Dictation
     let _ = engine_kind; // recorded above; engine loaded by kind
 
     // 1. Audio next — if the mic is denied, fail before the pill flashes.
+    // Read the configured input device from settings (falls back to default if not set or not found).
+    let input_device_id = {
+        let store = app.state::<SettingsStore>();
+        store.get().audio.input_device_id.clone()
+    };
     let (capture_session, mut consumer, level_rx) =
-        capture::start().context("start audio capture")?;
+        capture::start_with_device(input_device_id.as_deref()).context("start audio capture")?;
 
     // 2. Show the pill (must hop to the macOS main thread).
     show_pill_async(app);

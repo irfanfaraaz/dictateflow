@@ -452,3 +452,49 @@ pub async fn open_log_dir<R: Runtime>(app: AppHandle<R>) -> AppResult<()> {
     }
     Ok(())
 }
+
+// ---------- Audio device management ----------
+
+/// Information about an available input device.
+#[derive(Debug, Serialize, Clone)]
+pub struct InputDeviceInfo {
+    /// Device identifier (device name on macOS). Passed back to `start_with_device`.
+    pub id: String,
+    /// Human-readable device name.
+    pub name: String,
+    /// True if this is the system default input device.
+    pub is_default: bool,
+}
+
+/// List all available input audio devices.
+///
+/// Returns a vector of InputDeviceInfo structs, one per device. On macOS,
+/// `id` and `name` are the same (cpal doesn't expose stable device IDs).
+/// Sorting is unspecified; the frontend should sort by (is_default desc, name asc)
+/// if desired.
+#[tauri::command]
+pub async fn list_input_devices() -> AppResult<Vec<InputDeviceInfo>> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+
+    let host = cpal::default_host();
+
+    // Get the default device name for comparison.
+    let default_name = host.default_input_device().and_then(|d| d.name().ok());
+
+    // Enumerate all input devices.
+    let devices = host
+        .input_devices()
+        .context("enumerate input devices")?
+        .filter_map(|device| {
+            let name = device.name().ok()?;
+            let is_default = default_name.as_ref() == Some(&name);
+            Some(InputDeviceInfo {
+                id: name.clone(),
+                name,
+                is_default,
+            })
+        })
+        .collect();
+
+    Ok(devices)
+}

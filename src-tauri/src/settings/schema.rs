@@ -117,6 +117,15 @@ pub struct SoundsSettings {
     pub stop_enabled: bool,
 }
 
+/// Audio input device configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AudioSettings {
+    /// Optional input device name (as returned by `list_input_devices`).
+    /// If `None`, the system default device is used.
+    /// If the device name is not found, the system default is used as a fallback.
+    pub input_device_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub engine: EngineKind,
@@ -128,6 +137,8 @@ pub struct Settings {
     pub limits: Limits,
     pub pill: PillSettings,
     pub sounds: SoundsSettings,
+    #[serde(default)]
+    pub audio: AudioSettings,
     pub telemetry: bool,
     pub first_run_completed: bool,
 }
@@ -143,6 +154,7 @@ impl Default for Settings {
             limits: Limits::default(),
             pill: PillSettings::default(),
             sounds: SoundsSettings::default(),
+            audio: AudioSettings::default(),
             telemetry: false,
             first_run_completed: false,
         }

@@ -94,10 +94,50 @@ impl Drop for CaptureSession {
 /// The session handle MUST be kept alive for the duration of capture; dropping
 /// it stops the stream.
 pub fn start() -> Result<(CaptureSession, HeapCons<f32>, watch::Receiver<f32>), AudioError> {
+    start_with_device(None)
+}
+
+/// Starts audio capture on a specific device (or default if `device_id` is `None`).
+///
+/// # Arguments
+///
+/// - `device_id`: Optional device name (as returned by `list_input_devices`).
+///   If `None`, uses the system default device.
+///   If the device name is not found, logs a warning and falls back to default.
+///
+/// # Returns
+///
+/// A tuple of (CaptureSession, audio samples consumer, RMS level receiver).
+/// The session handle MUST be kept alive for the duration of capture; dropping
+/// it stops the stream.
+pub fn start_with_device(
+    device_id: Option<&str>,
+) -> Result<(CaptureSession, HeapCons<f32>, watch::Receiver<f32>), AudioError> {
     let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .ok_or(AudioError::NoDefaultDevice)?;
+    let device = match device_id {
+        None => host
+            .default_input_device()
+            .ok_or(AudioError::NoDefaultDevice)?,
+        Some(target_name) => {
+            // Try to find the device by name.
+            let found = host
+                .input_devices()
+                .map_err(|e| AudioError::BuildStream(format!("enumerate devices: {}", e)))?
+                .find(|d| d.name().map(|n| n == target_name).unwrap_or(false));
+
+            match found {
+                Some(d) => d,
+                None => {
+                    warn!(
+                        requested_device = %target_name,
+                        "requested input device not found; falling back to default"
+                    );
+                    host.default_input_device()
+                        .ok_or(AudioError::NoDefaultDevice)?
+                }
+            }
+        }
+    };
 
     let supported = device
         .default_input_config()

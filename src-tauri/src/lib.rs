@@ -92,6 +92,7 @@ pub fn run() {
             commands::cancel_model_download,
             commands::delete_model,
             commands::list_installed_models,
+            commands::list_input_devices,
         ])
         .setup(|app| {
             // Settings store load happens in setup so the AppHandle is

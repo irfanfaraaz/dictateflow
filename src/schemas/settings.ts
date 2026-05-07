@@ -46,6 +46,11 @@ export const soundsSettingsSchema = z.object({
 });
 export type SoundsSettings = z.infer<typeof soundsSettingsSchema>;
 
+export const audioSettingsSchema = z.object({
+  input_device_id: z.string().nullable().default(null),
+});
+export type AudioSettings = z.infer<typeof audioSettingsSchema>;
+
 export const settingsSchema = z.object({
   engine: engineKindSchema,
   local: localSettingsSchema,
@@ -55,6 +60,7 @@ export const settingsSchema = z.object({
   limits: limitsSchema,
   pill: pillSettingsSchema,
   sounds: soundsSettingsSchema,
+  audio: audioSettingsSchema.default({ input_device_id: null }),
   telemetry: z.boolean(),
   first_run_completed: z.boolean(),
 });

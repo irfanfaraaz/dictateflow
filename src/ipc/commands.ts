@@ -99,3 +99,40 @@ export async function listInstalledModels(): Promise<string[]> {
   }
   return raw as string[];
 }
+
+// ---------- Audio device management ----------
+
+/** Information about an available input audio device. */
+export interface InputDeviceInfo {
+  /** Device identifier (device name on macOS). */
+  id: string;
+  /** Human-readable device name. */
+  name: string;
+  /** True if this is the system default input device. */
+  is_default: boolean;
+}
+
+/** List all available input audio devices. */
+export async function listInputDevices(): Promise<InputDeviceInfo[]> {
+  const raw = await invoke<unknown>("list_input_devices");
+  if (!Array.isArray(raw)) {
+    throw new Error(
+      `list_input_devices: expected array, got ${typeof raw}`,
+    );
+  }
+  return raw.map((item) => {
+    if (
+      typeof item === "object" &&
+      item !== null &&
+      "id" in item &&
+      "name" in item &&
+      "is_default" in item &&
+      typeof (item as Record<string, unknown>).id === "string" &&
+      typeof (item as Record<string, unknown>).name === "string" &&
+      typeof (item as Record<string, unknown>).is_default === "boolean"
+    ) {
+      return item as InputDeviceInfo;
+    }
+    throw new Error(`list_input_devices: invalid device info ${JSON.stringify(item)}`);
+  });
+}

@@ -1,7 +1,7 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { DefinitionList, DossierCard } from "../components";
 import { useSettingsContext } from "../SettingsContext";
-import { setApiKey, clearApiKey } from "@/ipc/commands";
+import { setApiKey, clearApiKey, listInputDevices, type InputDeviceInfo } from "@/ipc/commands";
 import { useModelDownloads } from "@/hooks/useModelDownloads";
 import { findModel } from "@/models/catalog";
 import type { EngineKind } from "@/schemas/settings";
@@ -12,8 +12,89 @@ import type { EngineKind } from "@/schemas/settings";
  * The Scribe card hosts a live API-key entry row:
  *   - No key stored  → password input + [save] button.
  *   - Key stored     → redacted display + [rotate key] + [clear].
+ *
+ * The Engine tab also includes an input device picker above the cards.
  */
 const ENGINES: EngineKind[] = ["local", "scribe"];
+
+// ---------- InputDevicePicker ----------
+
+function InputDevicePicker(): JSX.Element {
+  const { settings, update } = useSettingsContext();
+  const [devices, setDevices] = useState<InputDeviceInfo[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  async function refresh() {
+    setLoading(true);
+    setError(null);
+    try {
+      const list = await listInputDevices();
+      setDevices(list);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void refresh();
+  }, []);
+
+  const selectedId = settings.audio.input_device_id ?? "";
+  const selectedDevice = devices.find((d) => d.id === selectedId);
+  const isSelectedDeviceMissing = selectedId && !selectedDevice;
+
+  return (
+    <div className="space-y-3 pb-4 mb-4 border-b border-rule">
+      <div>
+        <label className="block font-mono text-xs uppercase tracking-wide text-muted mb-2">
+          input device
+        </label>
+        <div className="flex items-center gap-2">
+          <select
+            aria-label="input audio device"
+            value={selectedId}
+            onChange={(e) =>
+              void update({
+                audio: { input_device_id: e.target.value || null },
+              })
+            }
+            disabled={loading}
+            className="flex-1 bg-transparent border-b border-rule font-mono text-sm text-text focus:border-accent outline-none cursor-pointer disabled:opacity-50"
+          >
+            <option value="">(default)</option>
+            {devices.map((device) => (
+              <option key={device.id} value={device.id}>
+                {device.name.toLowerCase()}
+                {device.is_default ? " (default)" : ""}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            onClick={() => void refresh()}
+            disabled={loading}
+            className="shrink-0 font-mono text-xs text-muted hover:text-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-50"
+          >
+            refresh
+          </button>
+        </div>
+      </div>
+      {isSelectedDeviceMissing && (
+        <p className="font-mono text-xs text-muted">
+          note : saved device "{selectedId}" not found — will use default
+        </p>
+      )}
+      {error && (
+        <p role="alert" className="font-mono text-xs text-accent">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
 
 // ---------- ApiKeyRow ----------
 
@@ -156,6 +237,7 @@ export function Engine(): JSX.Element {
 
   return (
     <div role="radiogroup" aria-label="transcription engine" className="space-y-6">
+      <InputDevicePicker />
       <DossierCard
         ref={localRef}
         header="local / on-device / private"
