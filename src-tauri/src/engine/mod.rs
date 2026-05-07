@@ -27,6 +27,7 @@
 
 #![allow(dead_code)] // surfaced incrementally across Phase 2.x
 
+pub mod factory;
 pub mod local;
 pub mod scribe;
 

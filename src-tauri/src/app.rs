@@ -20,18 +20,18 @@ use tracing::{info, warn};
 
 use crate::audio::capture::CaptureSession;
 use crate::engine::Engine;
+use crate::settings::schema::EngineKind;
 
 /// Lazily-initialised in `lib::run::setup`.
 ///
-/// Phase 2 holds the loaded `Engine` here. Engines are `Arc<dyn Engine>`
-/// so the dictation flow can clone the handle without locking.
+/// Holds the last-built engine keyed by its `EngineKind` so that switching
+/// local→scribe (or vice-versa) in Settings invalidates the cache on the
+/// next dictation without requiring an app restart.
 #[derive(Default)]
 pub struct AppState {
-    /// Active engine, lazily loaded on first dictation. None if model load
-    /// has not been attempted yet or failed (we surface the failure to the
-    /// frontend via `dictation:error` and reset to None so the next press
-    /// retries).
-    engine: Mutex<Option<Arc<dyn Engine>>>,
+    /// `(kind, engine)` — None if no engine has been built yet or the last
+    /// build failed. On failure we reset to None so the next F5 press retries.
+    engine: Mutex<Option<(EngineKind, Arc<dyn Engine>)>>,
 }
 
 impl AppState {
@@ -39,25 +39,30 @@ impl AppState {
         Self::default()
     }
 
-    /// Get a handle to the engine, if one is loaded.
-    pub fn engine(&self) -> Option<Arc<dyn Engine>> {
+    /// Return the cached engine iff its `EngineKind` matches `kind`.
+    /// A mismatched kind means the user switched engines in Settings; we
+    /// return `None` so `ensure_engine_loaded` rebuilds.
+    pub fn engine_for_kind(&self, kind: EngineKind) -> Option<Arc<dyn Engine>> {
         match self.engine.lock() {
-            Ok(g) => g.clone(),
-            Err(p) => p.into_inner().clone(),
+            Ok(g) => g.as_ref().and_then(|(k, e)| (*k == kind).then(|| e.clone())),
+            Err(p) => p
+                .into_inner()
+                .as_ref()
+                .and_then(|(k, e)| (*k == kind).then(|| e.clone())),
         }
     }
 
-    /// Install the engine handle. Replaces any existing one.
-    pub fn set_engine(&self, engine: Arc<dyn Engine>) {
+    /// Install the engine handle, tagged with its kind.
+    pub fn set_engine(&self, kind: EngineKind, engine: Arc<dyn Engine>) {
         let mut guard = match self.engine.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        *guard = Some(engine);
+        *guard = Some((kind, engine));
     }
 
     /// Forget the cached engine (used when load fails so the next dictation
-    /// retries).
+    /// retries, or when the API key is rotated/cleared).
     pub fn clear_engine(&self) {
         let mut guard = match self.engine.lock() {
             Ok(g) => g,

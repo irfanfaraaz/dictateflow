@@ -27,9 +27,9 @@ use tracing::{debug, info, warn};
 
 use crate::app::{AppState, DictationSession};
 use crate::audio::capture;
-use crate::engine::{local::LocalEngine, AudioChunk, Engine, EngineError};
+use crate::engine::{factory, AudioChunk, Engine, EngineError};
 use crate::inject;
-use crate::models;
+use crate::settings::SettingsStore;
 use crate::window;
 
 // ---------- Event names ----------
@@ -42,6 +42,8 @@ pub const EV_DICTATION_ERROR: &str = "dictation:error";
 /// briefly flash it. Phase 3 deletes both this event and the pill
 /// subscription; instead the controller invokes the clipboard injector.
 pub const EV_DICTATION_FINAL: &str = "dictation:final";
+/// Emitted after engine construction so the settings UI can show a health dot.
+pub const EV_ENGINE_STATUS: &str = "engine:status";
 
 // ---------- Payloads ----------
 
@@ -73,6 +75,13 @@ pub struct ErrorPayload {
 #[derive(Debug, Serialize, Clone)]
 pub struct FinalPayload {
     pub text: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct EngineStatusPayload {
+    pub engine: String,
+    pub healthy: bool,
+    pub last_error: Option<String>,
 }
 
 // ---------- Hot-path orchestration ----------
@@ -111,10 +120,10 @@ const ENGINE_CHANNEL_CAPACITY: usize = 64;
 /// [`DictationController`] until stop. On any setup failure we surface a
 /// `dictation:error` event and bail out without showing the pill.
 pub async fn start_dictation<R: Runtime>(app: &AppHandle<R>) -> Result<DictationSession> {
-    // 0. Resolve / load the engine first. Loading the model is a one-time
-    //    cost the first dictation pays; subsequent presses reuse the
-    //    cached `Arc<dyn Engine>` from `AppState`.
-    let engine = ensure_engine_loaded(app).context("load engine")?;
+    // 0. Resolve / load the engine first. Building the engine is a one-time
+    //    cost per kind; subsequent presses reuse the cached `Arc<dyn Engine>`
+    //    from `AppState` (invalidated automatically when the kind changes).
+    let engine = ensure_engine_loaded(app).await.context("load engine")?;
 
     // 1. Audio next — if the mic is denied, fail before the pill flashes.
     let (capture_session, mut consumer, level_rx) =
@@ -365,27 +374,60 @@ async fn level_pump<R: Runtime>(app: AppHandle<R>, mut rx: tokio::sync::watch::R
     }
 }
 
-/// Load the engine via `AppState`'s cache, or build it on first use.
+/// Load the engine for the current settings, using `AppState` as a cache.
 ///
-/// Phase 7 introduces a settings-driven factory that swaps engines on
-/// `settings:updated`; Phase 2 hard-codes `LocalEngine` against the
-/// `small` model.
-fn ensure_engine_loaded<R: Runtime>(app: &AppHandle<R>) -> Result<Arc<dyn Engine>> {
+/// Cache key is `EngineKind`: if the user switches local→scribe in Settings
+/// the old entry is evicted and the new engine is built fresh. On build
+/// failure we reset the cache to `None` so the next dictation retries.
+///
+/// After a successful build we run `health_check()` and emit `engine:status`
+/// so the Settings UI can show a green/red dot without blocking dictation.
+async fn ensure_engine_loaded<R: Runtime>(app: &AppHandle<R>) -> Result<Arc<dyn Engine>> {
     let state = app
         .try_state::<AppState>()
         .ok_or_else(|| anyhow!("AppState missing from Tauri state"))?;
+    let settings_store = app
+        .try_state::<SettingsStore>()
+        .ok_or_else(|| anyhow!("SettingsStore missing from Tauri state"))?;
 
-    if let Some(engine) = state.engine() {
+    // Read settings without holding the lock across any await.
+    let settings = settings_store.get();
+    let kind = settings.engine;
+
+    if let Some(engine) = state.engine_for_kind(kind) {
         return Ok(engine);
     }
 
-    let model_path =
-        models::resolve_path(app, "small").with_context(|| "resolve ggml-small model path")?;
-    let engine = LocalEngine::load(&model_path)
-        .with_context(|| format!("load LocalEngine from {}", model_path.display()))?;
-    let engine: Arc<dyn Engine> = Arc::new(engine);
-    state.set_engine(engine.clone());
-    info!(model = %model_path.display(), "engine loaded");
+    // Build fresh — this is the expensive path (model file I/O or first
+    // keychain lookup). Errors surface as `dictation:error` to the frontend.
+    let engine: Arc<dyn Engine> = factory::build(app, &settings).map_err(|e| {
+        state.clear_engine();
+        anyhow::Error::from(e)
+    })?;
+
+    state.set_engine(kind, engine.clone());
+    info!(?kind, "engine built and cached");
+
+    // Health-check is best-effort: we don't fail the dictation on a bad
+    // health result, just surface the status to the frontend.
+    let engine_for_health = engine.clone();
+    let app_for_health = app.clone();
+    let kind_str = format!("{kind:?}").to_lowercase();
+    tokio::spawn(async move {
+        let (healthy, last_error) = match engine_for_health.health_check().await {
+            Ok(()) => (true, None),
+            Err(e) => (false, Some(e.to_string())),
+        };
+        let payload = EngineStatusPayload {
+            engine: kind_str,
+            healthy,
+            last_error,
+        };
+        if let Err(e) = app_for_health.emit(EV_ENGINE_STATUS, payload) {
+            warn!(?e, "emit engine:status failed");
+        }
+    });
+
     Ok(engine)
 }
 
@@ -399,10 +441,16 @@ fn emit_error<R: Runtime>(app: &AppHandle<R>, err: &EngineError) {
         EngineError::Io(_) => "io",
         EngineError::WebSocket(_) => "websocket",
     };
+    let recovery_hint: Option<String> = match err {
+        EngineError::MissingApiKey => Some(
+            "open settings → engine to add your elevenlabs key".into(),
+        ),
+        _ => None,
+    };
     let payload = ErrorPayload {
         code,
         message: err.to_string(),
-        recovery_hint: None,
+        recovery_hint,
     };
     if let Err(e) = app.emit(EV_DICTATION_ERROR, payload) {
         warn!(?e, "emit dictation:error failed");
