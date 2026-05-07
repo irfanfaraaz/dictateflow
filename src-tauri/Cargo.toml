@@ -49,6 +49,7 @@ objc2-foundation = { version = "0.2", features = [
     "NSString",
     "NSURL",
     "NSArray",
+    "NSThread",
 ] }
 core-graphics = "0.24"
 

@@ -6,6 +6,7 @@
 mod app;
 mod audio;
 mod error;
+mod window;
 
 use app::AppState;
 use tauri::Manager;
