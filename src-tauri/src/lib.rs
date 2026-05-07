@@ -30,6 +30,7 @@ pub mod __test_only {
 }
 
 use app::{AppState, DictationController};
+use hotkey::listener::HotkeyManager;
 use tauri::Manager;
 use tracing::{error, info, warn};
 
@@ -49,6 +50,7 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(AppState::new())
         .manage(DictationController::new())
+        .manage(HotkeyManager::new())
         .invoke_handler(tauri::generate_handler![
             commands::get_settings,
             commands::update_settings,
@@ -84,13 +86,14 @@ pub fn run() {
                 .expect("settings window must exist");
             settings.show().expect("show settings window");
 
-            // Register the F5 hold-to-talk hotkey. Failures here are
-            // typically a missing Input Monitoring grant; we log and
-            // continue so the settings window remains usable.
-            if let Err(e) = hotkey::listener::register(app.handle()) {
+            // Register the configured hotkey (falls back to F5 on parse/OS
+            // failure). Requires Input Monitoring permission on macOS; we log
+            // and continue so the settings window stays usable even if the
+            // permission hasn't been granted yet.
+            if let Err(e) = hotkey::listener::register_from_settings(app.handle()) {
                 warn!(
                     ?e,
-                    "failed to register F5 hotkey (input monitoring permission?)"
+                    "failed to register hotkey (input monitoring permission?)"
                 );
             }
             Ok(())

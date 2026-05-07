@@ -4,17 +4,18 @@ import { useSettingsContext } from "../SettingsContext";
 import type { HotkeyMode } from "@/schemas/settings";
 
 /**
- * Hotkey configuration. Mode is hold-vs-toggle (live today; the listener
- * still hardcodes F5 hold, but the persisted value drives Phase 8).
+ * Hotkey configuration tab. Phase 8: rebind is live — the captured chord is
+ * validated by Rust and the global shortcut is re-registered immediately.
  *
- * Rebind UX: focus the rebind row → press the trigger button → row enters
- * "capture" state (red border, focused) → next keydown becomes the new
- * binding string. Phase 8 wires the result into a re-registered global
- * shortcut; Phase 4 only persists the string.
+ * Rebind UX: click "rebind …" → row enters "capture" state (accent border) →
+ * next keydown (non-modifier) becomes the new binding → committed via
+ * `update_settings`. If Rust rejects the chord (forbidden or parse error) an
+ * inline error row appears. Esc cancels without changes.
  */
 export function Hotkey(): JSX.Element {
   const { settings, update } = useSettingsContext();
   const [capturing, setCapturing] = useState(false);
+  const [bindError, setBindError] = useState<string | null>(null);
   const captureRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -22,8 +23,7 @@ export function Hotkey(): JSX.Element {
     captureRef.current?.focus();
 
     function onKey(e: KeyboardEvent) {
-      // Escape exits capture without persisting anything — matches the
-      // editorial brief's "every action is reachable by keyboard."
+      // Escape exits capture without persisting anything.
       if (e.key === "Escape") {
         e.preventDefault();
         setCapturing(false);
@@ -39,18 +39,25 @@ export function Hotkey(): JSX.Element {
       if (e.ctrlKey) parts.push("Ctrl");
       if (e.altKey) parts.push("Alt");
       if (e.shiftKey) parts.push("Shift");
-      // Function keys come through as `F1`..`F19`; otherwise uppercase the
-      // single character so `a` and `A` collapse onto one binding string.
+      // Function keys come through as `F1`..`F19`; otherwise uppercase so
+      // `a` and `A` collapse onto one binding string.
       const key = /^F\d{1,2}$/.test(e.key) ? e.key : e.key.toUpperCase();
       parts.push(key);
       const binding = parts.join("+");
-      void update({ hotkey: { binding } });
+
       setCapturing(false);
+      setBindError(null);
+
+      // update() calls `update_settings` which validates + rebinds on the
+      // Rust side. On rejection the promise rejects with the error string.
+      update({ hotkey: { binding } }).catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        setBindError(msg);
+      });
     }
 
     function onKeyUp() {
-      // Listen on keyup as well so a quick tap is captured even if the
-      // browser chrome swallows the keydown for an Fn key.
+      // No-op; kept so a quick Fn-key tap on keyup can't escape the listener.
     }
 
     window.addEventListener("keydown", onKey, { capture: true });
@@ -110,17 +117,21 @@ export function Hotkey(): JSX.Element {
 
           <button
             type="button"
-            onClick={() => setCapturing((c) => !c)}
+            onClick={() => {
+              setBindError(null);
+              setCapturing((c) => !c);
+            }}
             className="font-mono text-sm uppercase tracking-wide text-accent underline underline-offset-4"
           >
             {capturing ? "cancel" : "rebind …"}
           </button>
         </div>
 
-        <p className="mt-4 text-muted text-xs">
-          re-registering the live hotkey lands in phase 8 — the string above
-          is persisted, but F5 stays the active trigger until then.
-        </p>
+        {bindError !== null && (
+          <p className="mt-3 font-mono text-xs text-red-400" role="alert">
+            {bindError}
+          </p>
+        )}
       </DossierCard>
     </div>
   );

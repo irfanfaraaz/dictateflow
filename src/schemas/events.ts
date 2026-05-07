@@ -5,8 +5,16 @@ import { z } from "zod";
 
 export const dictationStartSchema = z.object({
   trigger: z.enum(["hold", "toggle"]),
+  /** Engine-aware cap in seconds. Pill uses this for `mm:ss / cap` display
+   *  and the 80% warning threshold. */
+  cap_seconds: z.number().int().nonnegative(),
 });
 export type DictationStart = z.infer<typeof dictationStartSchema>;
+
+export const capReachedSchema = z.object({
+  cap_seconds: z.number().int().nonnegative(),
+});
+export type CapReached = z.infer<typeof capReachedSchema>;
 
 export const audioLevelSchema = z.object({
   rms: z.number(),
@@ -40,6 +48,7 @@ export const EVENT = {
   injected: "dictation:injected",
   error: "dictation:error",
   final: "dictation:final",
+  capReached: "dictation:cap_reached",
 } as const;
 
 // ---------- Model download event schemas (Phase 5) ----------

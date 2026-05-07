@@ -12,6 +12,7 @@
 #![allow(dead_code)] // wired into commands as later phases land
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tauri::{AppHandle, Runtime};
@@ -105,6 +106,10 @@ pub struct DictationSession {
     /// Watches RMS levels and triggers early-stop on sustained silence (Phase 6).
     /// Calls `audio_stop.cancel()` when `SilenceDetector` fires `SustainedSilence`.
     pub(crate) vad_task: JoinHandle<()>,
+    /// Engine-aware cap timer (Phase 8). Calls `audio_stop.cancel()` when the
+    /// session hits `local_max_seconds` or `scribe_max_seconds`. Aborted on
+    /// normal stop so a short dictation doesn't wait for the full cap.
+    pub(crate) cap_task: JoinHandle<()>,
     /// Signals the audio pump to drain residual samples and exit. Distinct
     /// from `cancel` because end-of-dictation is a *clean* stream-close, not
     /// an abort.
@@ -121,6 +126,7 @@ impl DictationSession {
         audio_pump: JoinHandle<()>,
         engine_pump: JoinHandle<()>,
         vad_task: JoinHandle<()>,
+        cap_task: JoinHandle<()>,
         audio_stop: CancellationToken,
         cancel: CancellationToken,
     ) -> Self {
@@ -130,6 +136,7 @@ impl DictationSession {
             audio_pump,
             engine_pump,
             vad_task,
+            cap_task,
             audio_stop,
             cancel,
         }
@@ -139,14 +146,51 @@ impl DictationSession {
 /// Coordinates "hotkey down → start" and "hotkey up → stop". Holds the
 /// in-flight dictation behind a Mutex; we only ever lock for the duration
 /// of a `take()` or `replace()` and never across an await point.
-#[derive(Default)]
+///
+/// `toggle_active` tracks whether a toggle-mode dictation is in progress so
+/// the second keypress knows to stop rather than start. It mirrors the logical
+/// state of `inflight`: set when we successfully start, cleared when we stop.
+/// An `AtomicBool` is sufficient — no await involved.
 pub struct DictationController {
     inflight: Mutex<Option<DictationSession>>,
+    /// Toggle-mode active flag. `true` = dictation is running.
+    toggle_active: AtomicBool,
+}
+
+impl Default for DictationController {
+    fn default() -> Self {
+        Self {
+            inflight: Mutex::new(None),
+            toggle_active: AtomicBool::new(false),
+        }
+    }
 }
 
 impl DictationController {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    /// Toggle-mode handler: start if not active, stop if active.
+    pub async fn toggle<R: Runtime>(self: Arc<Self>, app: AppHandle<R>) {
+        // swap returns the *previous* value; if it was false we should start.
+        let was_active = self.toggle_active.swap(true, Ordering::SeqCst);
+        if was_active {
+            // Already running — stop.
+            self.toggle_active.store(false, Ordering::SeqCst);
+            Arc::clone(&self).stop(app).await;
+        } else {
+            // Not running — start.
+            Arc::clone(&self).start(app).await;
+            // If start failed, reset the flag.
+            let guard = match self.inflight.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            if guard.is_none() {
+                self.toggle_active.store(false, Ordering::SeqCst);
+            }
+        }
     }
 
     /// Begin a dictation. No-op if one is already in flight.
@@ -187,6 +231,9 @@ impl DictationController {
             };
             guard.take()
         };
+        // Clear toggle flag regardless of mode so a mode-switch mid-session
+        // doesn't leave toggle_active stale.
+        self.toggle_active.store(false, Ordering::SeqCst);
         if let Some(session) = session {
             crate::events::stop_dictation(&app, session).await;
         }

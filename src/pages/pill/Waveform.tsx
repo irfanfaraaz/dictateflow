@@ -7,6 +7,8 @@ const MIN_BAR_HEIGHT = 3;
 const MAX_BAR_HEIGHT = 28;
 // Per shape brief: Tailwind `accent` token = oklch(0.62 0.20 25).
 const BAR_COLOR = "oklch(0.62 0.20 25)";
+// 80% cap warning: brighter, more saturated red.
+const BAR_COLOR_WARN = "oklch(0.72 0.28 25)";
 // Per-frame easing factor for the bar-height interpolation. Lower = smoother
 // (more visual lag), higher = snappier. 0.25 lands close to a 60 Hz spring
 // without the cost of a real solver.
@@ -17,6 +19,8 @@ interface WaveformProps {
   level: number;
   /** When true, render a static red dot instead of bars. */
   reducedMotion?: boolean;
+  /** When true (≥80% of cap), brighten the waveform to signal urgency. */
+  warn?: boolean;
 }
 
 /**
@@ -29,18 +33,22 @@ interface WaveformProps {
  * loop is cheaper (and stays inside the GPU compositor) than 12 React
  * style updates per frame.
  */
-export function Waveform({ level, reducedMotion = false }: WaveformProps) {
+export function Waveform({ level, reducedMotion = false, warn = false }: WaveformProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const heightsRef = useRef<Float32Array>(new Float32Array(BAR_COUNT));
   const targetsRef = useRef<Float32Array>(new Float32Array(BAR_COUNT));
   const levelRef = useRef<number>(level);
+  const warnRef = useRef<boolean>(warn);
   const rafRef = useRef<number | null>(null);
 
-  // Push the latest level into a ref so the rAF loop can read it without
-  // re-subscribing every render.
+  // Push the latest level + warn flag into refs so the rAF loop can read
+  // them without re-subscribing every render.
   useEffect(() => {
     levelRef.current = level;
   }, [level]);
+  useEffect(() => {
+    warnRef.current = warn;
+  }, [warn]);
 
   useEffect(() => {
     if (reducedMotion) return; // static dot path
@@ -78,7 +86,7 @@ export function Waveform({ level, reducedMotion = false }: WaveformProps) {
       }
 
       ctx.clearRect(0, 0, width, height);
-      ctx.fillStyle = BAR_COLOR;
+      ctx.fillStyle = warnRef.current ? BAR_COLOR_WARN : BAR_COLOR;
       for (let i = 0; i < BAR_COUNT; i += 1) {
         const h = Math.max(MIN_BAR_HEIGHT, heights[i]);
         const x = i * (BAR_WIDTH + BAR_GAP);
@@ -99,7 +107,7 @@ export function Waveform({ level, reducedMotion = false }: WaveformProps) {
       <span
         aria-hidden="true"
         className="inline-block h-2 w-2 rounded-full"
-        style={{ background: BAR_COLOR }}
+        style={{ background: warn ? BAR_COLOR_WARN : BAR_COLOR }}
       />
     );
   }

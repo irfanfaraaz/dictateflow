@@ -45,6 +45,9 @@ pub const EV_DICTATION_ERROR: &str = "dictation:error";
 pub const EV_DICTATION_FINAL: &str = "dictation:final";
 /// Emitted after engine construction so the settings UI can show a health dot.
 pub const EV_ENGINE_STATUS: &str = "engine:status";
+/// Emitted by the cap timer when the session has reached its maximum duration.
+/// Payload carries the cap that was enforced so the pill can show a warning.
+pub const EV_DICTATION_CAP_REACHED: &str = "dictation:cap_reached";
 
 // ---------- Model download event names (Phase 5) ----------
 
@@ -59,7 +62,15 @@ pub const EV_MODEL_DOWNLOAD_ERROR: &str = "model:download_error";
 
 #[derive(Debug, Serialize, Clone)]
 pub struct DictationStartPayload {
-    pub trigger: &'static str, // "hold" | "toggle" — Phase 8 wires toggle
+    pub trigger: &'static str, // "hold" | "toggle"
+    /// Engine-aware cap in seconds. Pill uses this to compute the 80% warning
+    /// threshold and to display `mm:ss / cap` without an extra event.
+    pub cap_seconds: u32,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct CapReachedPayload {
+    pub cap_seconds: u32,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -144,31 +155,38 @@ const AUDIO_PUMP_INTERVAL: Duration = Duration::from_millis(100);
 const ENGINE_CHANNEL_CAPACITY: usize = 64;
 
 /// Begin a dictation: load the engine if needed, show the pill, start
-/// capture, and spawn the level / audio / engine pumps.
+/// capture, and spawn the level / audio / engine / cap pumps.
 ///
 /// Returns the live session — caller stores it in the
 /// [`DictationController`] until stop. On any setup failure we surface a
 /// `dictation:error` event and bail out without showing the pill.
 pub async fn start_dictation<R: Runtime>(app: &AppHandle<R>) -> Result<DictationSession> {
+    use crate::settings::schema::EngineKind;
+
     // 0a. Guard: local engine with no installed models → no-op.
     //
     // `LocalEngine::load` would return `ModelNotInstalled` anyway, but we
     // short-circuit here so the pill never flashes and no error event is
     // emitted. Phase 9 wires up the error chip; for now we just warn + bail.
-    {
+    let (engine_kind, cap_seconds) = {
         let store = app.state::<SettingsStore>();
         let settings = store.get();
-        use crate::settings::schema::EngineKind;
         if settings.engine == EngineKind::Local && settings.local.installed_models.is_empty() {
             warn!("start_dictation: local engine selected but no models installed — ignoring");
             return Err(anyhow!("no model installed"));
         }
-    }
+        let cap = match settings.engine {
+            EngineKind::Local => settings.limits.local_max_seconds,
+            EngineKind::Scribe => settings.limits.scribe_max_seconds,
+        };
+        (settings.engine, cap)
+    };
 
     // 0. Resolve / load the engine first. Building the engine is a one-time
     //    cost per kind; subsequent presses reuse the cached `Arc<dyn Engine>`
     //    from `AppState` (invalidated automatically when the kind changes).
     let engine = ensure_engine_loaded(app).await.context("load engine")?;
+    let _ = engine_kind; // recorded above; engine loaded by kind
 
     // 1. Audio next — if the mic is denied, fail before the pill flashes.
     let (capture_session, mut consumer, level_rx) =
@@ -177,10 +195,24 @@ pub async fn start_dictation<R: Runtime>(app: &AppHandle<R>) -> Result<Dictation
     // 2. Show the pill (must hop to the macOS main thread).
     show_pill_async(app);
 
-    // 3. Tell the frontend we've begun.
+    // 3. Tell the frontend we've begun. Include the cap so the pill can
+    //    display `mm:ss / cap` and compute the 80% warning threshold.
+    //
+    //    Read mode from settings to emit the correct trigger string.
+    let trigger = app
+        .try_state::<SettingsStore>()
+        .map(|s| match s.get().hotkey.mode {
+            crate::settings::schema::HotkeyMode::Hold => "hold",
+            crate::settings::schema::HotkeyMode::Toggle => "toggle",
+        })
+        .unwrap_or("hold");
+
     if let Err(e) = app.emit(
         EV_DICTATION_START,
-        DictationStartPayload { trigger: "hold" },
+        DictationStartPayload {
+            trigger,
+            cap_seconds,
+        },
     ) {
         warn!(?e, "emit dictation:start failed");
     }
@@ -206,6 +238,32 @@ pub async fn start_dictation<R: Runtime>(app: &AppHandle<R>) -> Result<Dictation
     let cancel = CancellationToken::new();
     let audio_stop = CancellationToken::new();
     let (audio_tx, audio_rx) = mpsc::channel::<AudioChunk>(ENGINE_CHANNEL_CAPACITY);
+
+    // 4c. Engine-aware cap timer. Fires `audio_stop` after `cap_seconds` —
+    //     same path as the VAD early-stop and the user releasing the hotkey.
+    //     Uses `tokio::select!` against `audio_stop` so it exits immediately
+    //     when dictation already ended normally.
+    let audio_stop_for_cap = audio_stop.clone();
+    let app_for_cap = app.clone();
+    let cap_task = tokio::spawn(async move {
+        let cap_dur = std::time::Duration::from_secs(u64::from(cap_seconds));
+        tokio::select! {
+            _ = tokio::time::sleep(cap_dur) => {
+                // Emit the warning event, then trigger clean stop.
+                if let Err(e) = app_for_cap.emit(
+                    EV_DICTATION_CAP_REACHED,
+                    CapReachedPayload { cap_seconds },
+                ) {
+                    debug!(?e, "emit dictation:cap_reached failed");
+                }
+                info!(cap_seconds, "cap reached — triggering auto-stop");
+                audio_stop_for_cap.cancel();
+            }
+            _ = audio_stop_for_cap.cancelled() => {
+                // Dictation ended before the cap — nothing to do.
+            }
+        }
+    });
 
     let audio_stop_for_vad = audio_stop.clone();
     let vad_task = tokio::spawn(async move {
@@ -347,6 +405,7 @@ pub async fn start_dictation<R: Runtime>(app: &AppHandle<R>) -> Result<Dictation
         audio_pump,
         engine_pump,
         vad_task,
+        cap_task,
         audio_stop,
         cancel,
     ))
@@ -389,6 +448,7 @@ pub async fn stop_dictation<R: Runtime>(app: &AppHandle<R>, session: DictationSe
         audio_pump,
         engine_pump,
         vad_task,
+        cap_task,
         audio_stop,
         cancel,
     } = session;
@@ -397,11 +457,12 @@ pub async fn stop_dictation<R: Runtime>(app: &AppHandle<R>, session: DictationSe
     //    ringbuf contents on its way out.
     drop(capture);
 
-    // 2. Stop the level event emitter and the VAD task — watch channel is
-    //    dead now (capture dropped). Aborting is idempotent if VAD already
-    //    triggered early-stop on its own.
+    // 2. Stop the level event emitter, the VAD task, and the cap timer —
+    //    all abort gracefully. The cap timer also exits via `audio_stop`
+    //    cancellation (select! arm), but abort is the fast path on normal stop.
     level_pump.abort();
     vad_task.abort();
+    cap_task.abort();
 
     // 3. Give the cpal callback a tick to land its final buffer in the
     //    ringbuf, then signal the audio pump to drain + exit. The pump

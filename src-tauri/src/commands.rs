@@ -11,6 +11,8 @@
 //! separate `spawn_blocking`. The `SettingsStore` itself never holds a
 //! lock across an `.await`.
 
+use std::sync::Arc;
+
 use anyhow::Context;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -18,6 +20,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::AppResult;
+use crate::hotkey::listener::HotkeyManager;
 use crate::permissions::{self, PermissionKind, PermissionState};
 use crate::settings::{Settings, SettingsStore};
 
@@ -49,6 +52,27 @@ pub async fn update_settings<R: Runtime>(
     store: State<'_, SettingsStore>,
     patch: Value,
 ) -> AppResult<Settings> {
+    // If the patch touches `hotkey.binding`, validate + rebind BEFORE
+    // persisting so a bad chord is rejected without dirtying the store.
+    if let Some(obj) = patch.as_object() {
+        if let Some(hotkey_val) = obj.get("hotkey") {
+            if let Some(binding) = hotkey_val.get("binding").and_then(|v| v.as_str()) {
+                crate::hotkey::validate_binding(binding).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+                // Apply rebind immediately. On failure the old binding stays active;
+                // we still persist the validated value (it parsed OK, just the OS
+                // registration failed — likely a permission issue).
+                if let Some(mgr) = app.try_state::<Arc<HotkeyManager>>() {
+                    if let Err(e) = mgr.rebind(&app, binding) {
+                        tracing::warn!(?e, "rebind failed — old hotkey preserved");
+                        // Reject the update so the UI stays consistent with the active binding.
+                        return Err(anyhow::anyhow!("rebind failed: {e}").into());
+                    }
+                }
+            }
+        }
+    }
+
     let next = store.update_patch(&app, patch).context("update settings")?;
 
     // Emit AFTER the store mutation so listeners on other windows can rely

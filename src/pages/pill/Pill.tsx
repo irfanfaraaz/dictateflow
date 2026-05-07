@@ -10,8 +10,6 @@ import {
 } from "@/schemas/events";
 import { Waveform } from "@/pages/pill/Waveform";
 
-// 60 s placeholder cap; Phase 8 makes this engine-aware.
-const DURATION_CAP_SECONDS = 60;
 const FADE_MS = 120;
 
 function formatDuration(totalSeconds: number): string {
@@ -27,9 +25,12 @@ function formatDuration(totalSeconds: number): string {
  * a live waveform + duration counter. On `dictation:injected`, swaps the
  * counter for a "pasting…" beat while it fades out (~250 ms total).
  *
- * Per shape brief §3, the pill NEVER renders transcript text. The
- * `dictation:final` event still fires from Rust for downstream consumers,
- * but the pill does not subscribe to it.
+ * Phase 8: `cap_seconds` arrives in the start payload. Duration is displayed
+ * as `mm:ss / cap`. At 80% of cap the duration text turns bold + the waveform
+ * brightens red. At 100% the Rust cap timer fires `audio_stop`, which ends
+ * dictation via the normal stop path — no extra logic needed here.
+ *
+ * Per shape brief §3, the pill NEVER renders transcript text.
  */
 export function Pill() {
   const reducedMotion = useReducedMotion();
@@ -37,13 +38,17 @@ export function Pill() {
   const [level, setLevel] = useState<number>(0);
   const [seconds, setSeconds] = useState<number>(0);
   const [pasting, setPasting] = useState<boolean>(false);
+  // Engine-aware cap received from Rust on start. Defaults to 60 s until the
+  // first event arrives (matches the local engine default).
+  const [capSeconds, setCapSeconds] = useState<number>(60);
 
   // Stable callbacks so useEvent doesn't re-subscribe on every render.
-  const onStart = useCallback(() => {
+  const onStart = useCallback((p: { trigger: string; cap_seconds: number }) => {
     setActive(true);
     setSeconds(0);
     setLevel(0);
     setPasting(false);
+    setCapSeconds(p.cap_seconds);
   }, []);
   const onLevel = useCallback((p: { rms: number }) => {
     setLevel(p.rms);
@@ -72,7 +77,7 @@ export function Pill() {
     onInjectedRef.current = onInjected;
   }, [onInjected]);
 
-  useEvent(EVENT.start, dictationStartSchema, () => onStartRef.current());
+  useEvent(EVENT.start, dictationStartSchema, (p) => onStartRef.current(p));
   useEvent(EVENT.audioLevel, audioLevelSchema, (p) => onLevelRef.current(p));
   useEvent(EVENT.injected, injectedSchema, () => onInjectedRef.current());
 
@@ -84,6 +89,9 @@ export function Pill() {
     }, 1000);
     return () => window.clearInterval(id);
   }, [active]);
+
+  // 80% warning threshold — computed once per render (cheap).
+  const nearCap = capSeconds > 0 && seconds / capSeconds >= 0.8;
 
   return (
     <AnimatePresence>
@@ -100,7 +108,7 @@ export function Pill() {
           aria-label="dictation in progress"
         >
           <div className="flex h-7 w-[72px] items-center">
-            <Waveform level={level} reducedMotion={reducedMotion} />
+            <Waveform level={level} reducedMotion={reducedMotion} warn={nearCap} />
           </div>
           <span aria-hidden="true" className="opacity-50">
             ·
@@ -108,8 +116,15 @@ export function Pill() {
           {pasting ? (
             <span className="tabular-nums">pasting…</span>
           ) : (
-            <span className="tabular-nums">
-              {formatDuration(Math.min(seconds, 99 * 60 + 59))} / {DURATION_CAP_SECONDS}
+            <span
+              className={[
+                "tabular-nums",
+                nearCap ? "font-bold text-red-400" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+            >
+              {formatDuration(Math.min(seconds, 99 * 60 + 59))} / {capSeconds}
             </span>
           )}
         </motion.div>
