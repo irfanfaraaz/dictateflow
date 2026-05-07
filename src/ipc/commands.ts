@@ -68,3 +68,29 @@ export async function clearApiKey(): Promise<void> {
 export async function testEngine(): Promise<boolean> {
   return await invoke<boolean>("test_engine");
 }
+
+// ---------- Model management ----------
+
+/** Start downloading a GGML model by catalog id. Fire-and-forget; progress arrives via events. */
+export async function downloadModel(id: string): Promise<void> {
+  await invoke("download_model", { id });
+}
+
+/** Cancel an in-progress model download. No-op if none is running for the id. */
+export async function cancelModelDownload(id: string): Promise<void> {
+  await invoke("cancel_model_download", { id });
+}
+
+/** Delete an installed model file and sync installed_models in settings. */
+export async function deleteModel(id: string): Promise<void> {
+  await invoke("delete_model", { id });
+}
+
+/** Return the list of installed model ids (disk scan cross-referenced with catalog). */
+export async function listInstalledModels(): Promise<string[]> {
+  const raw = await invoke<unknown>("list_installed_models");
+  if (!Array.isArray(raw) || !raw.every((x) => typeof x === "string")) {
+    throw new Error(`list_installed_models: unexpected response ${JSON.stringify(raw)}`);
+  }
+  return raw as string[];
+}

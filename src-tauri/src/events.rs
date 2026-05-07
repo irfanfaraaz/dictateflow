@@ -45,6 +45,15 @@ pub const EV_DICTATION_FINAL: &str = "dictation:final";
 /// Emitted after engine construction so the settings UI can show a health dot.
 pub const EV_ENGINE_STATUS: &str = "engine:status";
 
+// ---------- Model download event names (Phase 5) ----------
+
+/// Emitted periodically during a model download.
+pub const EV_MODEL_DOWNLOAD_PROGRESS: &str = "model:download_progress";
+/// Emitted when a model download completes successfully.
+pub const EV_MODEL_DOWNLOAD_COMPLETE: &str = "model:download_complete";
+/// Emitted when a model download fails.
+pub const EV_MODEL_DOWNLOAD_ERROR: &str = "model:download_error";
+
 // ---------- Payloads ----------
 
 #[derive(Debug, Serialize, Clone)]
@@ -84,6 +93,26 @@ pub struct EngineStatusPayload {
     pub last_error: Option<String>,
 }
 
+// ---------- Model download payloads (Phase 5) ----------
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ModelDownloadProgressPayload {
+    pub id: String,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ModelDownloadCompletePayload {
+    pub id: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ModelDownloadErrorPayload {
+    pub id: String,
+    pub message: String,
+}
+
 // ---------- Hot-path orchestration ----------
 
 /// Cadence of `dictation:audio_level` event emission. 30 Hz keeps the pill
@@ -120,6 +149,21 @@ const ENGINE_CHANNEL_CAPACITY: usize = 64;
 /// [`DictationController`] until stop. On any setup failure we surface a
 /// `dictation:error` event and bail out without showing the pill.
 pub async fn start_dictation<R: Runtime>(app: &AppHandle<R>) -> Result<DictationSession> {
+    // 0a. Guard: local engine with no installed models → no-op.
+    //
+    // `LocalEngine::load` would return `ModelNotInstalled` anyway, but we
+    // short-circuit here so the pill never flashes and no error event is
+    // emitted. Phase 9 wires up the error chip; for now we just warn + bail.
+    {
+        let store = app.state::<SettingsStore>();
+        let settings = store.get();
+        use crate::settings::schema::EngineKind;
+        if settings.engine == EngineKind::Local && settings.local.installed_models.is_empty() {
+            warn!("start_dictation: local engine selected but no models installed — ignoring");
+            return Err(anyhow!("no model installed"));
+        }
+    }
+
     // 0. Resolve / load the engine first. Building the engine is a one-time
     //    cost per kind; subsequent presses reuse the cached `Arc<dyn Engine>`
     //    from `AppState` (invalidated automatically when the kind changes).

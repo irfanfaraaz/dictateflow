@@ -41,3 +41,29 @@ export const EVENT = {
   error: "dictation:error",
   final: "dictation:final",
 } as const;
+
+// ---------- Model download event schemas (Phase 5) ----------
+
+export const modelDownloadProgressSchema = z.object({
+  id: z.string(),
+  bytes_done: z.number(),
+  bytes_total: z.number(),
+});
+export type ModelDownloadProgress = z.infer<typeof modelDownloadProgressSchema>;
+
+export const modelDownloadCompleteSchema = z.object({
+  id: z.string(),
+});
+export type ModelDownloadComplete = z.infer<typeof modelDownloadCompleteSchema>;
+
+export const modelDownloadErrorSchema = z.object({
+  id: z.string(),
+  message: z.string(),
+});
+export type ModelDownloadError = z.infer<typeof modelDownloadErrorSchema>;
+
+export const MODEL_EVENT = {
+  progress: "model:download_progress",
+  complete: "model:download_complete",
+  error: "model:download_error",
+} as const;

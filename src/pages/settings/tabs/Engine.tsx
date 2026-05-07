@@ -2,6 +2,8 @@ import { useRef, useState } from "react";
 import { DefinitionList, DossierCard } from "../components";
 import { useSettingsContext } from "../SettingsContext";
 import { setApiKey, clearApiKey } from "@/ipc/commands";
+import { useModelDownloads } from "@/hooks/useModelDownloads";
+import { findModel } from "@/models/catalog";
 import type { EngineKind } from "@/schemas/settings";
 
 /**
@@ -124,6 +126,7 @@ function ApiKeyRow({ hasKey }: ApiKeyRowProps): JSX.Element {
 
 export function Engine(): JSX.Element {
   const { settings, update } = useSettingsContext();
+  const { installed } = useModelDownloads();
   const isLocal = settings.engine === "local";
   const isScribe = settings.engine === "scribe";
   const localRef = useRef<HTMLButtonElement | null>(null);
@@ -169,6 +172,33 @@ export function Engine(): JSX.Element {
             { term: "inference", value: "on-device" },
             { term: "data", value: "never leaves your device" },
             { term: "requirement", value: "Apple Silicon (M1 or later)" },
+            {
+              term: "model",
+              value:
+                installed.length === 0 ? (
+                  <span className="text-muted">
+                    (none — install one in models tab)
+                  </span>
+                ) : (
+                  <select
+                    aria-label="active whisper model"
+                    value={settings.local.model}
+                    onChange={(e) =>
+                      void update({ local: { model: e.target.value } })
+                    }
+                    className="bg-transparent border-b border-rule font-mono text-sm text-text focus:border-accent outline-none cursor-pointer"
+                  >
+                    {installed.map((id) => {
+                      const entry = findModel(id);
+                      return (
+                        <option key={id} value={id}>
+                          {entry ? entry.displayName.toLowerCase() : id}
+                        </option>
+                      );
+                    })}
+                  </select>
+                ),
+            },
           ]}
         />
       </DossierCard>

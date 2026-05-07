@@ -17,7 +17,7 @@ tauri-plugin-global-shortcut = "2"
 
 # async + error
 tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["rt"] }
+tokio-util = { version = "0.7", features = ["io", "rt"] }
 async-trait = "0.1"
 futures = "0.3"
 anyhow = "1"
@@ -72,9 +72,10 @@ security-framework = "2"
 tokio-tungstenite = { version = "0.23", features = ["rustls-tls-native-roots"] }
 url = "2"
 base64 = "0.22"
+reqwest = { version = "0.12", features = ["rustls-tls", "stream"] }
+sha2 = "0.10"
 
 [dev-dependencies]
-sha2 = "0.10"
 
 [features]
 default = ["custom-protocol"]

@@ -1,10 +1,13 @@
 import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Masthead, NavRail, type NavSection } from "./components";
+import { Banner, Masthead, NavRail, type NavSection } from "./components";
 import { About, Engine, Hotkey, Language, Models, Permissions } from "./tabs";
 import { SettingsProvider } from "./SettingsContext";
 import { useSettings } from "@/hooks/useSettings";
+import { useModelDownloads } from "@/hooks/useModelDownloads";
 import { useReducedMotion } from "@/hooks/useReducedMotion";
+
+const BANNER_DISMISSED_KEY = "wispertype.firstRunBannerDismissed";
 
 const SECTIONS: NavSection[] = [
   { id: "engine", label: "engine" },
@@ -35,8 +38,13 @@ const TABS: Record<string, () => JSX.Element> = {
  */
 export function SettingsApp(): JSX.Element {
   const { settings, update, ready } = useSettings();
+  const { installed } = useModelDownloads();
   const [active, setActive] = useState<string>("engine");
   const reduced = useReducedMotion();
+  // Lazy initializer reads from localStorage once on mount.
+  const [dismissed, setDismissed] = useState<boolean>(
+    () => localStorage.getItem(BANNER_DISMISSED_KEY) === "true",
+  );
 
   if (!ready || !settings) {
     return (
@@ -47,18 +55,25 @@ export function SettingsApp(): JSX.Element {
   }
 
   const Active = TABS[active] ?? Engine;
-  const showBanner = !settings.first_run_completed;
   const motionDuration = reduced ? 0 : 0.08;
+
+  // Show banner when: no model installed AND engine is local AND not dismissed.
+  const showBanner =
+    installed.length === 0 && settings.engine === "local" && !dismissed;
+
+  function handleDismiss() {
+    setDismissed(true);
+    localStorage.setItem(BANNER_DISMISSED_KEY, "true");
+  }
 
   return (
     <SettingsProvider value={{ settings, update }}>
       <div className="min-h-screen flex flex-col bg-ink text-text">
         {showBanner ? (
-          <FirstRunBanner
-            onDismiss={() => {
-              void update({ first_run_completed: true });
-            }}
-          />
+          <Banner onDismiss={handleDismiss}>
+            welcome <span className="text-muted">—</span> set engine + grant
+            mic to begin
+          </Banner>
         ) : null}
 
         <div
@@ -110,26 +125,6 @@ function SectionHeader({ id }: { id: string }): JSX.Element | null {
         {numeral} <span aria-hidden>—</span> {label}
       </p>
       <hr className="border-rule mt-2" />
-    </div>
-  );
-}
-
-function FirstRunBanner({ onDismiss }: { onDismiss: () => void }): JSX.Element {
-  return (
-    <div
-      role="status"
-      className="bg-paper text-ink px-8 py-3 flex items-center justify-between border-b border-rule"
-    >
-      <p className="font-mono text-sm lowercase">
-        welcome <span className="text-muted">—</span> set engine + grant mic to begin
-      </p>
-      <button
-        type="button"
-        onClick={onDismiss}
-        className="font-mono text-sm uppercase tracking-wide text-accent underline underline-offset-4"
-      >
-        dismiss
-      </button>
     </div>
   );
 }
