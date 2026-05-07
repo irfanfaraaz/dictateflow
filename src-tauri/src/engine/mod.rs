@@ -39,14 +39,16 @@ use tokio_util::sync::CancellationToken;
 
 use crate::audio::AudioError;
 
-/// A chunk of 16 kHz mono f32 PCM samples.
+/// A chunk of mono f32 PCM samples at a known sample rate.
 ///
 /// The audio capture layer pumps these through an `mpsc::Sender<AudioChunk>`
-/// to whichever engine is active. Phase 2 batches them all and runs Whisper
-/// once at end-of-stream; Phase 6 will consume them as they arrive.
+/// to whichever engine is active. The `sample_rate` field carries the
+/// effective rate after decimation so engines can tell the remote API the
+/// correct rate (e.g. 8 kHz for Bluetooth HFP mics, 16 kHz for built-in).
 #[derive(Debug, Clone)]
 pub struct AudioChunk {
     pub samples: Vec<f32>,
+    pub sample_rate: u32,
 }
 
 /// A single transcription result, possibly intermediate.

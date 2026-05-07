@@ -93,7 +93,7 @@ impl Drop for CaptureSession {
 ///
 /// The session handle MUST be kept alive for the duration of capture; dropping
 /// it stops the stream.
-pub fn start() -> Result<(CaptureSession, HeapCons<f32>, watch::Receiver<f32>), AudioError> {
+pub fn start() -> Result<(CaptureSession, HeapCons<f32>, watch::Receiver<f32>, u32), AudioError> {
     start_with_device(None)
 }
 
@@ -112,7 +112,7 @@ pub fn start() -> Result<(CaptureSession, HeapCons<f32>, watch::Receiver<f32>), 
 /// it stops the stream.
 pub fn start_with_device(
     device_id: Option<&str>,
-) -> Result<(CaptureSession, HeapCons<f32>, watch::Receiver<f32>), AudioError> {
+) -> Result<(CaptureSession, HeapCons<f32>, watch::Receiver<f32>, u32), AudioError> {
     let host = cpal::default_host();
     let device = match device_id {
         None => host
@@ -153,10 +153,12 @@ pub fn start_with_device(
     // device is already at 16k, the factor is 1 and we copy verbatim.
     let decim = (device_sample_rate as f32 / TARGET_SAMPLE_RATE as f32).round() as usize;
     let decim = decim.max(1);
+    let effective_rate = device_sample_rate / decim as u32;
 
     info!(
         device = %device_name,
         device_rate = device_sample_rate,
+        effective_rate,
         channels,
         format = ?sample_format,
         decim,
@@ -213,7 +215,7 @@ pub fn start_with_device(
         stopped,
     };
 
-    Ok((session, consumer, level_rx))
+    Ok((session, consumer, level_rx, effective_rate))
 }
 
 #[allow(clippy::too_many_arguments)]

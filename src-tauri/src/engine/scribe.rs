@@ -42,6 +42,8 @@ use tokio_tungstenite::tungstenite::http::Request;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
+use tracing::{debug, info, warn};
+
 use super::{AudioChunk, Engine, EngineError, EngineResult, Partial};
 
 /// Default Scribe v2 realtime streaming endpoint.
@@ -106,6 +108,7 @@ impl Engine for ScribeEngine {
         let (ws_stream, _resp) = tokio_tungstenite::connect_async(req)
             .await
             .map_err(|e| EngineError::WebSocket(e.to_string()))?;
+        info!("scribe: WebSocket connected");
         let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
         let (partial_tx, partial_rx) = mpsc::channel::<EngineResult<Partial>>(64);
@@ -115,21 +118,28 @@ impl Engine for ScribeEngine {
             // stop driving the audio branch (otherwise `audio_rx.recv()`
             // returns `None` repeatedly and we busy-loop on a closed channel).
             let mut audio_done = false;
+            let mut chunks_sent: u64 = 0;
 
             loop {
                 tokio::select! {
                     biased;
 
                     _ = cancel.cancelled() => {
+                        info!("scribe: cancelled after {} chunks", chunks_sent);
                         let _ = ws_tx.send(Message::Close(None)).await;
                         let _ = partial_tx.send(Err(EngineError::Cancelled)).await;
                         break;
                     }
 
                     chunk = audio_rx.recv(), if !audio_done => match chunk {
-                        Some(AudioChunk { samples }) => {
-                            let frame = encode_audio_chunk(&samples, false);
+                        Some(AudioChunk { samples, sample_rate }) => {
+                            chunks_sent += 1;
+                            if chunks_sent == 1 {
+                                info!(sample_rate, samples = samples.len(), "scribe: first audio chunk");
+                            }
+                            let frame = encode_audio_chunk(&samples, false, sample_rate);
                             if let Err(e) = ws_tx.send(Message::Text(frame)).await {
+                                warn!(?e, "scribe: ws send failed after {} chunks", chunks_sent);
                                 let _ = partial_tx
                                     .send(Err(EngineError::WebSocket(e.to_string())))
                                     .await;
@@ -137,20 +147,23 @@ impl Engine for ScribeEngine {
                             }
                         }
                         None => {
-                            // Audio sender dropped — send a final empty
-                            // chunk with `commit: true` to force the server
-                            // to emit a `committed_transcript`, then keep
-                            // draining ws_rx until that final event arrives.
+                            info!("scribe: audio EOF after {} chunks — sending commit", chunks_sent);
                             audio_done = true;
-                            let frame = encode_audio_chunk(&[], true);
+                            let frame = encode_audio_chunk(&[], true, 16_000);
                             let _ = ws_tx.send(Message::Text(frame)).await;
                         }
                     },
 
                     msg = ws_rx.next() => match msg {
                         Some(Ok(Message::Text(t))) => {
+                            debug!("scribe: ws recv: {}", &t[..t.len().min(200)]);
                             if let Some(p) = parse_partial(&t) {
                                 let is_final = p.is_final;
+                                info!(
+                                    is_final,
+                                    text_len = p.text.len(),
+                                    "scribe: transcript partial"
+                                );
                                 if partial_tx.send(Ok(p)).await.is_err() {
                                     break;
                                 }
@@ -162,14 +175,16 @@ impl Engine for ScribeEngine {
                         }
                         Some(Ok(Message::Binary(_))) => continue,
                         Some(Ok(Message::Ping(p))) => {
-                            // tungstenite's default config replies to pings
-                            // automatically, but be defensive.
                             let _ = ws_tx.send(Message::Pong(p)).await;
                         }
                         Some(Ok(Message::Pong(_))) => continue,
                         Some(Ok(Message::Frame(_))) => continue,
-                        Some(Ok(Message::Close(_))) | None => break,
+                        Some(Ok(Message::Close(_))) | None => {
+                            info!("scribe: ws closed/ended after {} chunks", chunks_sent);
+                            break;
+                        }
                         Some(Err(e)) => {
+                            warn!(?e, "scribe: ws error after {} chunks", chunks_sent);
                             let _ = partial_tx
                                 .send(Err(EngineError::WebSocket(e.to_string())))
                                 .await;
@@ -225,13 +240,14 @@ fn host_from_url(url: &str) -> Option<&str> {
 /// `commit: true` signals end-of-stream and forces the server to emit a
 /// `committed_transcript`. We wrap the i16 LE PCM bytes in base64 because
 /// the API takes JSON-only frames — raw binary frames are rejected.
-fn encode_audio_chunk(samples: &[f32], commit: bool) -> String {
+fn encode_audio_chunk(samples: &[f32], commit: bool, sample_rate: u32) -> String {
     let pcm = pcm_f32_to_i16_le(samples);
     let b64 = BASE64.encode(&pcm);
     let payload = serde_json::json!({
         "message_type": "input_audio_chunk",
         "audio_base_64": b64,
         "commit": commit,
+        "sample_rate": sample_rate,
     });
     payload.to_string()
 }
@@ -313,7 +329,7 @@ mod tests {
 
     #[test]
     fn encode_audio_chunk_shape_and_base64() {
-        let frame = encode_audio_chunk(&[0.0_f32, 1.0, -1.0], false);
+        let frame = encode_audio_chunk(&[0.0_f32, 1.0, -1.0], false, 16_000);
         let v: serde_json::Value = serde_json::from_str(&frame).expect("valid json");
         assert_eq!(v["message_type"], "input_audio_chunk");
         assert_eq!(v["commit"], false);
@@ -325,7 +341,7 @@ mod tests {
 
     #[test]
     fn encode_audio_chunk_commit_flag_set_on_close() {
-        let frame = encode_audio_chunk(&[], true);
+        let frame = encode_audio_chunk(&[], true, 16_000);
         let v: serde_json::Value = serde_json::from_str(&frame).expect("valid json");
         assert_eq!(v["commit"], true);
         assert_eq!(v["audio_base_64"], "");

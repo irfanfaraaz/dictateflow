@@ -207,7 +207,7 @@ pub async fn start_dictation<R: Runtime>(app: &AppHandle<R>) -> Result<Dictation
         let store = app.state::<SettingsStore>();
         store.get().audio.input_device_id.clone()
     };
-    let (capture_session, mut consumer, level_rx) =
+    let (capture_session, mut consumer, level_rx, effective_rate) =
         capture::start_with_device(input_device_id.as_deref()).context("start audio capture")?;
 
     // 2. Show the pill (must hop to the macOS main thread).
@@ -328,14 +328,11 @@ pub async fn start_dictation<R: Runtime>(app: &AppHandle<R>) -> Result<Dictation
             tokio::select! {
                 biased;
                 _ = audio_stop_for_pump.cancelled() => {
-                    // One last drain so we don't lose the tail of the
-                    // hold-to-talk audio that arrived between the previous
-                    // tick and the stop signal.
-                    drain_consumer(&mut consumer, &mut scratch, &audio_tx).await;
+                    drain_consumer(&mut consumer, &mut scratch, &audio_tx, effective_rate).await;
                     return;
                 }
                 _ = ticker.tick() => {
-                    drain_consumer(&mut consumer, &mut scratch, &audio_tx).await;
+                    drain_consumer(&mut consumer, &mut scratch, &audio_tx, effective_rate).await;
                 }
             }
         }
@@ -466,6 +463,7 @@ async fn drain_consumer(
     consumer: &mut ringbuf::HeapCons<f32>,
     scratch: &mut [f32],
     audio_tx: &mpsc::Sender<AudioChunk>,
+    sample_rate: u32,
 ) {
     let occupied = consumer.occupied_len();
     if occupied == 0 {
@@ -479,6 +477,7 @@ async fn drain_consumer(
         }
         let chunk = AudioChunk {
             samples: scratch[..popped].to_vec(),
+            sample_rate,
         };
         if audio_tx.send(chunk).await.is_err() {
             return;
