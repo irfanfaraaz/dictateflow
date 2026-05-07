@@ -123,40 +123,24 @@ pub fn set_state<R: Runtime>(app: &AppHandle<R>, state: TrayState) -> tauri::Res
 
 /// Load the icon image for the given state.
 ///
-/// TODO(phase-10): swap per-state paths once distinct assets are sourced from
-/// the design pass. All three currently resolve to `icons/icon.png`.
+/// TODO(phase-10): swap per-state assets once distinct icons are sourced from
+/// the design pass. All three currently resolve to the bundled window icon
+/// that Tauri already loaded from `bundle.icon` at startup — no decoding,
+/// no resource_dir lookup, no panic surface.
 fn load_icon<R: Runtime>(app: &AppHandle<R>, state: TrayState) -> Image<'static> {
-    // Asset paths (relative to the Tauri resource dir) per state.
-    // When distinct assets exist, replace each arm with its own filename.
     let _state_label = match state {
-        TrayState::Idle => "idle",           // TODO: tray-idle.png
-        TrayState::Listening => "listening", // TODO: tray-listening.png
-        TrayState::Error => "error",         // TODO: tray-error.png
+        TrayState::Idle => "idle",
+        TrayState::Listening => "listening",
+        TrayState::Error => "error",
     };
 
-    // Until distinct assets are sourced, share the single bundled icon.
-    let icon_path = app
-        .path()
-        .resource_dir()
-        .ok()
-        .map(|d| d.join("icons/icon.png"))
-        .unwrap_or_else(|| std::path::PathBuf::from("icons/icon.png"));
+    if let Some(icon) = app.default_window_icon() {
+        return Image::new_owned(icon.rgba().to_vec(), icon.width(), icon.height());
+    }
 
-    Image::from_path(&icon_path).unwrap_or_else(|_| {
-        // Absolute last resort: a 1×1 transparent PNG.
-        warn!("tray icon asset missing — using blank fallback");
-        Image::from_bytes(&[
-            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG magic
-            0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, // IHDR chunk
-            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, // 1×1
-            0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49,
-            0x44, 0x41, // IDAT chunk
-            0x54, 0x78, 0x9C, 0x62, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0xE2, 0x21, 0xBC, 0x33,
-            0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, // IEND chunk
-            0x60, 0x82,
-        ])
-        .expect("hardcoded fallback PNG must be valid")
-    })
+    warn!("default_window_icon unavailable — using 1x1 transparent fallback");
+    // 1x1 transparent RGBA pixel via the raw constructor (no PNG decode).
+    Image::new_owned(vec![0, 0, 0, 0], 1, 1)
 }
 
 fn show_settings_window<R: Runtime>(app: &AppHandle<R>) {
