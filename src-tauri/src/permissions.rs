@@ -128,7 +128,10 @@ pub fn check_microphone() -> PermissionState {
             match dev.default_input_config() {
                 Ok(_) => PermissionState::Granted,
                 Err(e) => {
-                    warn!(?e, "mic default_input_config failed; reporting NotRequested");
+                    warn!(
+                        ?e,
+                        "mic default_input_config failed; reporting NotRequested"
+                    );
                     PermissionState::NotRequested
                 }
             }

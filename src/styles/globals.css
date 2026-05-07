@@ -16,4 +16,18 @@
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation-duration: 0ms !important; transition-duration: 0ms !important; }
   }
+
+  /*
+   * High-contrast variant. The default OKLCH palette is tuned for the
+   * editorial-magazine aesthetic — calm, slightly warm, low chroma. When
+   * the user opts into `prefers-contrast: more`, we bump body text and
+   * muted-meta text toward pure white so the 4.5:1 contrast floor lifts
+   * without redesigning the chrome. Single-rule swap, not a separate
+   * stylesheet, so the dossier-card borders and accents stay aligned.
+   */
+  @media (prefers-contrast: more) {
+    body { color: oklch(0.98 0 0); }
+    .text-text { color: oklch(0.98 0 0); }
+    .text-muted { color: oklch(0.75 0.005 60); }
+  }
 }
