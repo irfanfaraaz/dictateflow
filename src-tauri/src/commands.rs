@@ -29,7 +29,7 @@ use crate::settings::{Settings, SettingsStore};
 /// themselves.
 const EV_SETTINGS_UPDATED: &str = "settings:updated";
 
-/// Snapshot of all three TCC permissions wispertype cares about.
+/// Snapshot of all three TCC permissions DictateFlow cares about.
 ///
 /// Mirrors the zod schema in `src/schemas/settings.ts`. Reported in one
 /// command so the frontend can poll cheaply on a 2 s timer without three
@@ -408,19 +408,19 @@ pub async fn list_installed_models<R: Runtime>(app: AppHandle<R>) -> AppResult<V
 /// `path::PathResolver` is Rust-only.
 ///
 /// Returns the path to the log file (which may be rotating, e.g.
-/// `wispertype.log.2026-05-07`). For "open the log directory" use
+/// `dictateflow.log.2026-05-07`). For "open the log directory" use
 /// `open_log_dir` instead.
 #[tauri::command]
 pub async fn resolve_log_path<R: Runtime>(app: AppHandle<R>) -> AppResult<String> {
-    // `~/Library/Logs/wispertype/wispertype.log`. The directory is created
+    // `~/Library/Logs/dictateflow/dictateflow.log`. The directory is created
     // on first call so `open` doesn't fail with ENOENT before Phase 9 wires
     // the writer.
     let home = app.path().home_dir().context("resolve home dir")?;
-    let log_dir = home.join("Library/Logs/wispertype");
+    let log_dir = home.join("Library/Logs/dictateflow");
     if let Err(e) = std::fs::create_dir_all(&log_dir) {
         tracing::warn!(?e, "create log dir failed (non-fatal)");
     }
-    let log_file = log_dir.join("wispertype.log");
+    let log_file = log_dir.join("dictateflow.log");
     // Touch the file so `open` has something to launch.
     if !log_file.exists() {
         if let Err(e) = std::fs::write(&log_file, "") {
@@ -438,7 +438,7 @@ pub async fn resolve_log_path<R: Runtime>(app: AppHandle<R>) -> AppResult<String
 #[tauri::command]
 pub async fn open_log_dir<R: Runtime>(app: AppHandle<R>) -> AppResult<()> {
     let home = app.path().home_dir().context("resolve home dir")?;
-    let log_dir = home.join("Library/Logs/wispertype");
+    let log_dir = home.join("Library/Logs/dictateflow");
     if let Err(e) = std::fs::create_dir_all(&log_dir) {
         tracing::warn!(?e, "create log dir failed (non-fatal)");
     }

@@ -1,7 +1,7 @@
 //! macOS Keychain wrapper for storing API keys (BYOK secrets).
 //!
 //! All secrets live in a generic password keychain item under the
-//! service `com.wispertype.app`. The frontend never sees the actual
+//! service `com.dictateflow.app`. The frontend never sees the actual
 //! key — it only sees `has_api_key: bool` derived from presence here.
 //!
 //! # Why we route through Keychain instead of a settings file
@@ -21,8 +21,8 @@ use security_framework::passwords::{
 };
 use thiserror::Error;
 
-/// Service name used for all Wispertype keychain entries.
-const SERVICE: &str = "com.wispertype.app";
+/// Service name used for all DictateFlow keychain entries.
+const SERVICE: &str = "com.dictateflow.app";
 
 /// Account key under which the ElevenLabs API key is stored.
 pub const ELEVENLABS_KEY: &str = "elevenlabs_api_key";
@@ -87,7 +87,7 @@ mod tests {
     #[test]
     #[ignore = "writes to real keychain"]
     fn set_get_delete_round_trip() {
-        let key = "wispertype-test-key-xyz";
+        let key = "dictateflow-test-key-xyz";
         let value = "secret-value";
         let _guard = Cleanup(key);
 

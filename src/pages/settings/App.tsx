@@ -7,7 +7,7 @@ import { useSettings } from "@/hooks/useSettings";
 import { useModelDownloads } from "@/hooks/useModelDownloads";
 import { useReducedMotion } from "@/hooks/useReducedMotion";
 
-const BANNER_DISMISSED_KEY = "wispertype.firstRunBannerDismissed";
+const BANNER_DISMISSED_KEY = "dictateflow.firstRunBannerDismissed";
 
 const SECTIONS: NavSection[] = [
   { id: "engine", label: "engine" },

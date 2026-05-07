@@ -9,7 +9,7 @@ export function Masthead(): JSX.Element {
   return (
     <header className="bg-paper text-ink h-20 px-8 flex items-center justify-between border-b border-rule">
       <h1 className="font-display font-black text-5xl tracking-tight uppercase leading-none">
-        wispertype
+        DictateFlow
       </h1>
       <span className="font-mono text-sm tracking-wide uppercase">settings / 2026</span>
     </header>

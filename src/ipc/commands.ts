@@ -54,7 +54,7 @@ export async function resolveLogPath(): Promise<string> {
   return raw;
 }
 
-/** Open the log directory (~Library/Logs/wispertype/) in Finder. */
+/** Open the log directory (~Library/Logs/dictateflow/) in Finder. */
 export async function openLogDir(): Promise<void> {
   await invoke("open_log_dir");
 }

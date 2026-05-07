@@ -1,4 +1,4 @@
-//! wispertype library entry. The binary in `main.rs` calls into `run()`.
+//! DictateFlow library entry. The binary in `main.rs` calls into `run()`.
 //!
 //! Tauri 2.x's mobile/desktop split expects the app body to live in a lib so
 //! mobile targets can re-use the same setup. We follow the same convention here.
@@ -40,19 +40,19 @@ use tracing_subscriber::prelude::*;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // --- File logger setup ---
-    // Rolling daily log to ~/Library/Logs/wispertype/wispertype.log.YYYY-MM-DD
+    // Rolling daily log to ~/Library/Logs/dictateflow/dictateflow.log.YYYY-MM-DD
     // The non-blocking writer guard must outlive the program. Binding it to a
     // `let` inside `run()` is safe because `tauri::Builder::run()` blocks
     // until quit — the binding is live for the entire app lifetime.
     let log_dir = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("Library/Logs/wispertype");
+        .join("Library/Logs/dictateflow");
     let _ = std::fs::create_dir_all(&log_dir);
-    let file_appender = tracing_appender::rolling::daily(&log_dir, "wispertype.log");
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "dictateflow.log");
     let (non_blocking_file, _file_guard) = tracing_appender::non_blocking(file_appender);
 
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("wispertype=info"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("dictateflow=info"));
 
     // Stdout layer (existing dev experience) + file layer.
     tracing_subscriber::registry()
@@ -69,7 +69,7 @@ pub fn run() {
         )
         .init();
 
-    info!("wispertype starting");
+    info!("dictateflow starting");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::new().build())

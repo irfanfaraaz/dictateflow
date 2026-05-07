@@ -8,7 +8,7 @@
 //! held an image, file reference, RTF, or anything else non-textual, we
 //! capture `text: None` and the [`restore`] becomes a no-op rather than
 //! corrupting the prior contents with an empty string. Documented in
-//! JOURNEY §09; users with image-clipboards are warned that wispertype
+//! JOURNEY §09; users with image-clipboards are warned that dictateflow
 //! will leave their pasteboard unchanged after dictation.
 
 use arboard::Clipboard;
@@ -71,7 +71,7 @@ mod tests {
     fn round_trip_text() {
         // This test mutates the host pasteboard — opt-in via `cargo test --
         // --ignored`. Skipped on headless CI.
-        let original = "wispertype-clipboard-test-marker";
+        let original = "dictateflow-clipboard-test-marker";
         {
             let mut cb = Clipboard::new().expect("open clipboard");
             cb.set_text(original.to_owned()).expect("seed clipboard");

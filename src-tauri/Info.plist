@@ -3,9 +3,9 @@
 <plist version="1.0">
 <dict>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Wispertype captures microphone audio while you hold the dictation hotkey, transcribes it, and pastes the text into the focused application. Audio is processed only while dictating; nothing is recorded otherwise.</string>
+	<string>DictateFlow captures microphone audio while you hold the dictation hotkey, transcribes it, and pastes the text into the focused application. Audio is processed only while dictating; nothing is recorded otherwise.</string>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>Wispertype simulates Cmd+V to paste transcribed text into the focused application.</string>
+	<string>DictateFlow simulates Cmd+V to paste transcribed text into the focused application.</string>
 	<key>LSUIElement</key>
 	<true/>
 </dict>

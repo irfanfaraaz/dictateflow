@@ -51,7 +51,7 @@ export function About(): JSX.Element {
             { term: "input mon.", value: perms?.input_monitoring ?? "…" },
             {
               term: "logs",
-              value: "~/Library/Logs/wispertype/ (rotating daily)",
+              value: "~/Library/Logs/dictateflow/ (rotating daily)",
             },
           ]}
         />

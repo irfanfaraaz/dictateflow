@@ -23,7 +23,7 @@ use crate::engine::EngineError;
 ///
 /// Lookup order (first hit wins):
 ///
-/// 1. **App data dir** — `~/Library/Application Support/com.wispertype.app/models/ggml-<id>.bin`.
+/// 1. **App data dir** — `~/Library/Application Support/com.dictateflow.app/models/ggml-<id>.bin`.
 ///    This is where Phase 5's UI downloader writes new models, and where a
 ///    dev can drop a file via `scripts/download-model.sh` without rebuilding.
 /// 2. **Bundled resource** — `<resource_dir>/ggml-<id>.bin`. Tauri's
