@@ -406,6 +406,10 @@ pub async fn list_installed_models<R: Runtime>(app: AppHandle<R>) -> AppResult<V
 /// Resolve a known app file path the frontend can pass back to `open_path`.
 /// We expose it as a command rather than computing in the renderer because
 /// `path::PathResolver` is Rust-only.
+///
+/// Returns the path to the log file (which may be rotating, e.g.
+/// `wispertype.log.2026-05-07`). For "open the log directory" use
+/// `open_log_dir` instead.
 #[tauri::command]
 pub async fn resolve_log_path<R: Runtime>(app: AppHandle<R>) -> AppResult<String> {
     // `~/Library/Logs/wispertype/wispertype.log`. The directory is created
@@ -424,4 +428,27 @@ pub async fn resolve_log_path<R: Runtime>(app: AppHandle<R>) -> AppResult<String
         }
     }
     Ok(log_file.to_string_lossy().into_owned())
+}
+
+/// Open the log directory in Finder.
+///
+/// Phase 9: `tracing-appender` writes rotating daily files to this directory.
+/// Revealing the directory (not one specific file) lets the user see all
+/// dated log files without needing to know the current date suffix.
+#[tauri::command]
+pub async fn open_log_dir<R: Runtime>(app: AppHandle<R>) -> AppResult<()> {
+    let home = app.path().home_dir().context("resolve home dir")?;
+    let log_dir = home.join("Library/Logs/wispertype");
+    if let Err(e) = std::fs::create_dir_all(&log_dir) {
+        tracing::warn!(?e, "create log dir failed (non-fatal)");
+    }
+    let path_str = log_dir.to_string_lossy().into_owned();
+    let status = std::process::Command::new("open")
+        .arg(&path_str)
+        .status()
+        .with_context(|| format!("spawn `open` for {path_str}"))?;
+    if !status.success() {
+        return Err(anyhow::anyhow!("`open {path_str}` exited with {status}").into());
+    }
+    Ok(())
 }
