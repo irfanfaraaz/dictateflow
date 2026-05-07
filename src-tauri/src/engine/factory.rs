@@ -72,10 +72,10 @@ mod tests {
         // Pre-clean in case a prior test run left a stale entry.
         let _ = keychain::delete(ELEVENLABS_KEY);
 
-        let err = build_scribe().unwrap_err();
+        let result = build_scribe();
         assert!(
-            matches!(err, EngineError::MissingApiKey),
-            "expected MissingApiKey, got: {err:?}"
+            matches!(result, Err(EngineError::MissingApiKey)),
+            "expected Err(MissingApiKey)"
         );
     }
 }

@@ -442,9 +442,9 @@ fn emit_error<R: Runtime>(app: &AppHandle<R>, err: &EngineError) {
         EngineError::WebSocket(_) => "websocket",
     };
     let recovery_hint: Option<String> = match err {
-        EngineError::MissingApiKey => Some(
-            "open settings → engine to add your elevenlabs key".into(),
-        ),
+        EngineError::MissingApiKey => {
+            Some("open settings → engine to add your elevenlabs key".into())
+        }
         _ => None,
     };
     let payload = ErrorPayload {

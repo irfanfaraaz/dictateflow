@@ -160,8 +160,8 @@ pub async fn test_engine<R: Runtime>(
     store: State<'_, SettingsStore>,
 ) -> AppResult<bool> {
     let settings = store.get();
-    let engine = crate::engine::factory::build(&app, &settings)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let engine =
+        crate::engine::factory::build(&app, &settings).map_err(|e| anyhow::anyhow!("{e}"))?;
     engine
         .health_check()
         .await

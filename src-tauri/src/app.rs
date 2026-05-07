@@ -44,7 +44,9 @@ impl AppState {
     /// return `None` so `ensure_engine_loaded` rebuilds.
     pub fn engine_for_kind(&self, kind: EngineKind) -> Option<Arc<dyn Engine>> {
         match self.engine.lock() {
-            Ok(g) => g.as_ref().and_then(|(k, e)| (*k == kind).then(|| e.clone())),
+            Ok(g) => g
+                .as_ref()
+                .and_then(|(k, e)| (*k == kind).then(|| e.clone())),
             Err(p) => p
                 .into_inner()
                 .as_ref()
