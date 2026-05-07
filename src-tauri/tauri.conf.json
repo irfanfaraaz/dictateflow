@@ -48,6 +48,7 @@
   "bundle": {
     "active": true,
     "targets": "app",
-    "icon": ["icons/icon.png"]
+    "icon": ["icons/icon.png"],
+    "resources": ["resources/*"]
   }
 }

@@ -53,6 +53,18 @@ objc2-foundation = { version = "0.2", features = [
 ] }
 core-graphics = "0.24"
 
+# whisper.cpp via whisper-rs (Metal acceleration on Apple Silicon)
+whisper-rs = { version = "0.13", features = ["metal"] }
+
+# WAV decoding for tests + (later) fixture utilities
+hound = "3.5"
+
+# Resource resolution for the bundled GGML model
+dirs = "5"
+
+[dev-dependencies]
+sha2 = "0.10"
+
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]

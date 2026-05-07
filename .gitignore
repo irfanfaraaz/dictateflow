@@ -24,3 +24,10 @@ src-tauri/WixTools/
 # Env
 .env
 .env.local
+
+# Whisper model weights — large GGML binaries must never be committed.
+# These ship to end-users via the Tauri resource bundle (see
+# src-tauri/resources/README.md) or are downloaded into the app data dir
+# at runtime (Phase 5).
+*.bin
+src-tauri/resources/*.bin
