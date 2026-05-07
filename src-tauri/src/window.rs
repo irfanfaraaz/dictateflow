@@ -23,7 +23,7 @@ use anyhow::{anyhow, Context, Result};
 use objc2::rc::Retained;
 use objc2_app_kit::{NSEvent, NSScreen, NSWindow};
 use objc2_foundation::{MainThreadMarker, NSPoint};
-use tauri::{AppHandle, LogicalPosition, Manager, PhysicalPosition, WebviewWindow};
+use tauri::{AppHandle, LogicalPosition, Manager, PhysicalPosition, Runtime, WebviewWindow};
 use tracing::warn;
 
 /// The Tauri label of the pill window (declared in tauri.conf.json).
@@ -50,7 +50,7 @@ const MENU_BAR_HEIGHT: f64 = 24.0;
 /// as a `&NSWindow`. Tauri owns the lifetime of the window for as long as
 /// the WebviewWindow exists; we never store the pointer or use it past this
 /// call.
-pub fn make_click_through(window: &WebviewWindow) -> Result<()> {
+pub fn make_click_through<R: Runtime>(window: &WebviewWindow<R>) -> Result<()> {
     let ns_window_ptr = window
         .ns_window()
         .map_err(|e| anyhow!("ns_window() failed: {e}"))?;
@@ -71,7 +71,7 @@ pub fn make_click_through(window: &WebviewWindow) -> Result<()> {
 ///
 /// Must be called from the main thread (use [`AppHandle::run_on_main_thread`]
 /// to dispatch from a background task).
-pub fn show_at_cursor(app: &AppHandle) -> Result<()> {
+pub fn show_at_cursor<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
     let window = app
         .get_webview_window(PILL_LABEL)
         .ok_or_else(|| anyhow!("pill window '{PILL_LABEL}' not found"))?;
@@ -92,7 +92,7 @@ pub fn show_at_cursor(app: &AppHandle) -> Result<()> {
 }
 
 /// Hide the pill window.
-pub fn hide(app: &AppHandle) -> Result<()> {
+pub fn hide<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
     let window = app
         .get_webview_window(PILL_LABEL)
         .ok_or_else(|| anyhow!("pill window '{PILL_LABEL}' not found"))?;
@@ -152,7 +152,7 @@ fn compute_pill_position() -> Result<tauri::Position> {
 }
 
 /// Convenience: dispatch [`show_at_cursor`] onto the macOS main thread.
-pub fn show_at_cursor_async(app: AppHandle) {
+pub fn show_at_cursor_async<R: Runtime>(app: AppHandle<R>) {
     let app2 = app.clone();
     if let Err(e) = app.run_on_main_thread(move || {
         if let Err(e) = show_at_cursor(&app2) {
@@ -164,7 +164,7 @@ pub fn show_at_cursor_async(app: AppHandle) {
 }
 
 /// Convenience: dispatch [`hide`] onto the macOS main thread.
-pub fn hide_async(app: AppHandle) {
+pub fn hide_async<R: Runtime>(app: AppHandle<R>) {
     let app2 = app.clone();
     if let Err(e) = app.run_on_main_thread(move || {
         if let Err(e) = hide(&app2) {

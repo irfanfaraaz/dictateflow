@@ -6,11 +6,14 @@
 mod app;
 mod audio;
 mod error;
+mod events;
+mod hotkey;
+mod permissions;
 mod window;
 
-use app::AppState;
+use app::{AppState, DictationController};
 use tauri::Manager;
-use tracing::info;
+use tracing::{info, warn};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -27,11 +30,22 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(AppState::new())
+        .manage(DictationController::new())
         .setup(|app| {
             let settings = app
                 .get_webview_window("settings")
                 .expect("settings window must exist");
             settings.show().expect("show settings window");
+
+            // Register the F5 hold-to-talk hotkey. Failures here are
+            // typically a missing Input Monitoring grant; we log and
+            // continue so the settings window remains usable.
+            if let Err(e) = hotkey::listener::register(app.handle()) {
+                warn!(
+                    ?e,
+                    "failed to register F5 hotkey (input monitoring permission?)"
+                );
+            }
             Ok(())
         })
         .run(tauri::generate_context!())
