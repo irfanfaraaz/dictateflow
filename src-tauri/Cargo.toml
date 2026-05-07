@@ -68,6 +68,11 @@ arboard = "3.4"
 # macOS Keychain (Phase 7.1: BYOK secret storage)
 security-framework = "2"
 
+# WebSocket client for Scribe v2 streaming engine (Phase 7.2)
+tokio-tungstenite = { version = "0.23", features = ["rustls-tls-native-roots"] }
+url = "2"
+base64 = "0.22"
+
 [dev-dependencies]
 sha2 = "0.10"
 

@@ -28,6 +28,7 @@
 #![allow(dead_code)] // surfaced incrementally across Phase 2.x
 
 pub mod local;
+pub mod scribe;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -82,6 +83,11 @@ pub enum EngineError {
 
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+
+    /// WebSocket transport failure (handshake, frame send/recv, close).
+    /// Used by [`scribe::ScribeEngine`].
+    #[error("websocket: {0}")]
+    WebSocket(String),
 }
 
 /// Convenience alias used in implementations.

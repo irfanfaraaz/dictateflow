@@ -1,0 +1,325 @@
+//! ElevenLabs Scribe v2 realtime engine.
+//!
+//! Streams 16 kHz mono PCM to ElevenLabs over a single WebSocket session and
+//! relays partial / final transcripts back through the [`Engine`] trait's
+//! `Stream<Result<Partial, _>>` interface.
+//!
+//! # Wire shape (defensive — verify against current docs)
+//!
+//! - Connect: `wss://api.elevenlabs.io/v1/speech-to-text/stream` with the
+//!   `xi-api-key: <user_key>` header on the upgrade request.
+//! - Audio out: binary frames containing little-endian 16-bit PCM samples
+//!   (we convert from `f32` in `pcm_f32_to_i16_le`).
+//! - Transcripts in: text frames with JSON like `{"text":"…","is_final":bool}`.
+//!   Field names vary across API revisions; [`parse_partial`] tolerates
+//!   `is_final` / `final` / `done` and treats unknown shapes as no-ops.
+//! - Stop: send `{"type":"close"}` then a WebSocket Close frame.
+//!
+//! # No reconnect
+//!
+//! On WebSocket failure we surface the error and end the stream. The next
+//! dictation press starts fresh — simpler than coordinating audio buffer
+//! replay across a reconnect, and matches the user-facing model where the
+//! pill represents one in-flight session.
+//!
+//! # Phase 7.3 wiring TODO
+//!
+//! - add `pub mod scribe;` to `src/engine/mod.rs`
+//! - add an `EngineKind::Scribe` arm to the engine factory (factory lives in
+//!   Phase 7.3, after the settings store from Phase 4 is in place)
+//! - read api key from keychain at construction; bubble `MissingApiKey` if
+//!   absent (`crate::keychain::get(crate::keychain::ELEVENLABS_KEY)`)
+
+#![allow(dead_code)] // surfaced in Phase 7.3 via the engine factory
+
+use async_trait::async_trait;
+use futures::stream::BoxStream;
+use futures::{SinkExt, StreamExt};
+use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::handshake::client::generate_key;
+use tokio_tungstenite::tungstenite::http::Request;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_util::sync::CancellationToken;
+
+use super::{AudioChunk, Engine, EngineError, EngineResult, Partial};
+
+/// Default Scribe v2 streaming endpoint.
+///
+/// Centralised so that flipping it (e.g. ElevenLabs renames the route to
+/// `/v1/realtime/scribe-v2`) is a one-line change. Tests can also point at
+/// a local mock via [`ScribeEngine::with_url`].
+pub const SCRIBE_WS_URL: &str = "wss://api.elevenlabs.io/v1/speech-to-text/stream";
+
+/// WebSocket-backed realtime engine for ElevenLabs Scribe v2.
+pub struct ScribeEngine {
+    api_key: String,
+    url: String,
+}
+
+impl ScribeEngine {
+    /// Build a ScribeEngine pointing at the production endpoint.
+    pub fn new(api_key: String) -> Self {
+        Self {
+            api_key,
+            url: SCRIBE_WS_URL.to_string(),
+        }
+    }
+
+    /// Build a ScribeEngine pointing at an arbitrary URL (mock servers, test
+    /// fixtures, or a future endpoint rename).
+    pub fn with_url(api_key: String, url: String) -> Self {
+        Self { api_key, url }
+    }
+}
+
+#[async_trait]
+impl Engine for ScribeEngine {
+    async fn stream(
+        &self,
+        mut audio_rx: mpsc::Receiver<AudioChunk>,
+        cancel: CancellationToken,
+    ) -> EngineResult<BoxStream<'static, EngineResult<Partial>>> {
+        if self.api_key.trim().is_empty() {
+            return Err(EngineError::MissingApiKey);
+        }
+
+        // Build the upgrade request manually so we can inject the
+        // `xi-api-key` header — the simple `connect_async(url)` form has no
+        // hook for custom headers.
+        let req = Request::builder()
+            .method("GET")
+            .uri(&self.url)
+            .header(
+                "Host",
+                host_from_url(&self.url).unwrap_or("api.elevenlabs.io"),
+            )
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-WebSocket-Version", "13")
+            .header("Sec-WebSocket-Key", generate_key())
+            .header("xi-api-key", &self.api_key)
+            .body(())
+            .map_err(|e| EngineError::Inference(format!("ws request build: {e}")))?;
+
+        let (ws_stream, _resp) = tokio_tungstenite::connect_async(req)
+            .await
+            .map_err(|e| EngineError::WebSocket(e.to_string()))?;
+        let (mut ws_tx, mut ws_rx) = ws_stream.split();
+
+        let (partial_tx, partial_rx) = mpsc::channel::<EngineResult<Partial>>(64);
+
+        tokio::spawn(async move {
+            // Track whether the client has signalled end-of-audio so we can
+            // stop driving the audio branch (otherwise `audio_rx.recv()`
+            // returns `None` repeatedly and we busy-loop on a closed channel).
+            let mut audio_done = false;
+
+            loop {
+                tokio::select! {
+                    biased;
+
+                    _ = cancel.cancelled() => {
+                        let _ = ws_tx.send(Message::Close(None)).await;
+                        let _ = partial_tx.send(Err(EngineError::Cancelled)).await;
+                        break;
+                    }
+
+                    chunk = audio_rx.recv(), if !audio_done => match chunk {
+                        Some(AudioChunk { samples }) => {
+                            let bytes = pcm_f32_to_i16_le(&samples);
+                            if let Err(e) = ws_tx.send(Message::Binary(bytes)).await {
+                                let _ = partial_tx
+                                    .send(Err(EngineError::WebSocket(e.to_string())))
+                                    .await;
+                                break;
+                            }
+                        }
+                        None => {
+                            // Audio sender dropped — flush a close marker
+                            // and keep draining ws_rx until the server says
+                            // it's done.
+                            audio_done = true;
+                            let _ = ws_tx
+                                .send(Message::Text(r#"{"type":"close"}"#.into()))
+                                .await;
+                        }
+                    },
+
+                    msg = ws_rx.next() => match msg {
+                        Some(Ok(Message::Text(t))) => {
+                            if let Some(p) = parse_partial(&t) {
+                                let is_final = p.is_final;
+                                if partial_tx.send(Ok(p)).await.is_err() {
+                                    break;
+                                }
+                                if is_final {
+                                    let _ = ws_tx.send(Message::Close(None)).await;
+                                    break;
+                                }
+                            }
+                        }
+                        Some(Ok(Message::Binary(_))) => continue,
+                        Some(Ok(Message::Ping(p))) => {
+                            // tungstenite's default config replies to pings
+                            // automatically, but be defensive.
+                            let _ = ws_tx.send(Message::Pong(p)).await;
+                        }
+                        Some(Ok(Message::Pong(_))) => continue,
+                        Some(Ok(Message::Frame(_))) => continue,
+                        Some(Ok(Message::Close(_))) | None => break,
+                        Some(Err(e)) => {
+                            let _ = partial_tx
+                                .send(Err(EngineError::WebSocket(e.to_string())))
+                                .await;
+                            break;
+                        }
+                    },
+                }
+            }
+        });
+
+        let stream = futures::stream::unfold(partial_rx, |mut rx| async move {
+            rx.recv().await.map(|item| (item, rx))
+        });
+        Ok(Box::pin(stream))
+    }
+
+    async fn health_check(&self) -> EngineResult<()> {
+        // Phase 7.2 keeps this cheap: presence-only. Phase 7.3 may upgrade to
+        // a real `/v1/user` GET so the settings UI can show "key valid".
+        if self.api_key.trim().is_empty() {
+            return Err(EngineError::MissingApiKey);
+        }
+        Ok(())
+    }
+}
+
+/// Convert 16 kHz mono `f32` PCM in [-1.0, 1.0] to little-endian `i16` bytes.
+///
+/// Out-of-range samples are clamped — Whisper's capture path normalises but
+/// streaming engines might receive a hot mic. We scale by `32767` (not
+/// `32768`) to keep the positive and negative ranges symmetric.
+fn pcm_f32_to_i16_le(samples: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(samples.len() * 2);
+    for &s in samples {
+        let clamped = s.clamp(-1.0, 1.0);
+        let i = (clamped * 32767.0) as i16;
+        out.extend_from_slice(&i.to_le_bytes());
+    }
+    out
+}
+
+/// Pull the host out of a `wss://host[:port]/path` URL for the upgrade
+/// request's `Host` header. Falls back to `None` on malformed input so the
+/// caller can substitute a sensible default rather than crash.
+fn host_from_url(url: &str) -> Option<&str> {
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let host_with_port = after_scheme.split('/').next()?;
+    Some(host_with_port)
+}
+
+/// Parse a Scribe transcript text frame into a [`Partial`].
+///
+/// We match three field-name variants for the finality flag (`is_final`,
+/// `final`, `done`) because the realtime API has shipped each spelling at
+/// different times. Anything missing a `text` field is treated as a
+/// non-transcript control frame and ignored.
+fn parse_partial(json: &str) -> Option<Partial> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let text = v.get("text").and_then(|x| x.as_str())?.to_string();
+    let is_final = v
+        .get("is_final")
+        .and_then(|x| x.as_bool())
+        .or_else(|| v.get("final").and_then(|x| x.as_bool()))
+        .or_else(|| v.get("done").and_then(|x| x.as_bool()))
+        .unwrap_or(false);
+    let confidence = v
+        .get("confidence")
+        .and_then(|x| x.as_f64())
+        .map(|c| c as f32);
+    Some(Partial {
+        text,
+        is_final,
+        confidence,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_partial_is_final_variant() {
+        let p = parse_partial(r#"{"text":"hi","is_final":true}"#).expect("parse");
+        assert_eq!(p.text, "hi");
+        assert!(p.is_final);
+        assert!(p.confidence.is_none());
+    }
+
+    #[test]
+    fn parse_partial_final_variant() {
+        let p = parse_partial(r#"{"text":"foo","final":false}"#).expect("parse");
+        assert_eq!(p.text, "foo");
+        assert!(!p.is_final);
+    }
+
+    #[test]
+    fn parse_partial_done_variant_with_confidence() {
+        let p = parse_partial(r#"{"text":"x","done":true,"confidence":0.9}"#).expect("parse");
+        assert_eq!(p.text, "x");
+        assert!(p.is_final);
+        assert!((p.confidence.expect("conf") - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parse_partial_no_text_returns_none() {
+        assert!(parse_partial(r#"{"type":"ack"}"#).is_none());
+    }
+
+    #[test]
+    fn parse_partial_invalid_json_returns_none() {
+        assert!(parse_partial("not-json").is_none());
+    }
+
+    #[test]
+    fn pcm_f32_to_i16_le_endianness_and_clamp() {
+        // 0.0 -> 0
+        // 1.0 -> 32767  -> bytes [0xFF, 0x7F]   (little-endian)
+        // -1.0 -> -32767 -> bytes [0x01, 0x80]
+        let bytes = pcm_f32_to_i16_le(&[0.0, 1.0, -1.0]);
+        assert_eq!(bytes, vec![0, 0, 0xFF, 0x7F, 0x01, 0x80]);
+    }
+
+    #[test]
+    fn pcm_f32_to_i16_le_clamps_out_of_range() {
+        let bytes = pcm_f32_to_i16_le(&[2.0, -2.0]);
+        assert_eq!(bytes, vec![0xFF, 0x7F, 0x01, 0x80]);
+    }
+
+    #[test]
+    fn host_from_url_extracts_host() {
+        assert_eq!(
+            host_from_url("wss://api.elevenlabs.io/v1/speech-to-text/stream"),
+            Some("api.elevenlabs.io")
+        );
+        assert_eq!(
+            host_from_url("wss://localhost:8080/x"),
+            Some("localhost:8080")
+        );
+    }
+
+    #[tokio::test]
+    async fn health_check_rejects_empty_key() {
+        let e = ScribeEngine::new(String::new());
+        assert!(matches!(
+            e.health_check().await,
+            Err(EngineError::MissingApiKey)
+        ));
+    }
+
+    #[tokio::test]
+    async fn health_check_accepts_nonempty_key() {
+        let e = ScribeEngine::new("xi-test-key".to_string());
+        assert!(e.health_check().await.is_ok());
+    }
+}

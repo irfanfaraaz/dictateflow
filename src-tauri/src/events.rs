@@ -397,6 +397,7 @@ fn emit_error<R: Runtime>(app: &AppHandle<R>, err: &EngineError) {
         EngineError::Inference(_) => "inference",
         EngineError::Cancelled => "cancelled",
         EngineError::Io(_) => "io",
+        EngineError::WebSocket(_) => "websocket",
     };
     let payload = ErrorPayload {
         code,
