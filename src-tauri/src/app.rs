@@ -151,8 +151,19 @@ impl DictationSession {
 /// the second keypress knows to stop rather than start. It mirrors the logical
 /// state of `inflight`: set when we successfully start, cleared when we stop.
 /// An `AtomicBool` is sufficient — no await involved.
+///
+/// # Cancel-on-restart (Phase 9)
+/// `cancel_token` stores the `CancellationToken` from the most recently
+/// started session. When a new hotkey-down arrives while the prior session is
+/// still finalizing (i.e., `stop_dictation` is awaiting its `engine_pump`),
+/// we fire the token so the old inference task aborts immediately rather than
+/// blocking the new dictation. The token is replaced atomically under the same
+/// Mutex lock, so there is no window where two live tokens can co-exist.
 pub struct DictationController {
     inflight: Mutex<Option<DictationSession>>,
+    /// The cancel token of the most recent session, kept alive so a new
+    /// start can abort stale finalization.
+    last_cancel: Mutex<Option<CancellationToken>>,
     /// Toggle-mode active flag. `true` = dictation is running.
     toggle_active: AtomicBool,
 }
@@ -161,6 +172,7 @@ impl Default for DictationController {
     fn default() -> Self {
         Self {
             inflight: Mutex::new(None),
+            last_cancel: Mutex::new(None),
             toggle_active: AtomicBool::new(false),
         }
     }
@@ -194,22 +206,52 @@ impl DictationController {
     }
 
     /// Begin a dictation. No-op if one is already in flight.
+    ///
+    /// Cancel-on-restart: if a prior session is still finalizing (i.e., the
+    /// inflight slot is empty but `last_cancel` is live because `stop()` took
+    /// the session but `stop_dictation` hasn't returned yet), fire the old
+    /// cancel token so the stale inference aborts and the new dictation starts
+    /// cleanly without risking a double-paste.
     pub async fn start<R: Runtime>(self: Arc<Self>, app: AppHandle<R>) {
-        // Quick check: already running? Lock scope is tight; no `.await`
-        // inside.
-        {
+        // Grab and fire any stale cancel token from a prior session that is
+        // still finalizing. Also check `inflight` in the same lock scope.
+        let already_running = {
             let guard = match self.inflight.lock() {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
-            if guard.is_some() {
-                info!("start ignored: dictation already in flight");
-                return;
+            guard.is_some()
+        };
+
+        if already_running {
+            info!("start ignored: dictation already in flight");
+            return;
+        }
+
+        // Fire stale cancel token from a prior session that is in teardown.
+        {
+            let guard = match self.last_cancel.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            if let Some(token) = guard.as_ref() {
+                if !token.is_cancelled() {
+                    info!("cancel-on-restart: firing stale session cancel token");
+                    token.cancel();
+                }
             }
         }
 
         match crate::events::start_dictation(&app).await {
             Ok(session) => {
+                // Store cancel token for potential future cancel-on-restart.
+                {
+                    let mut cancel_guard = match self.last_cancel.lock() {
+                        Ok(g) => g,
+                        Err(p) => p.into_inner(),
+                    };
+                    *cancel_guard = Some(session.cancel.clone());
+                }
                 let mut guard = match self.inflight.lock() {
                     Ok(g) => g,
                     Err(p) => p.into_inner(),
