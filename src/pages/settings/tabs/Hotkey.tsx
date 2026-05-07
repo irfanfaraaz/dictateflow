@@ -22,6 +22,13 @@ export function Hotkey(): JSX.Element {
     captureRef.current?.focus();
 
     function onKey(e: KeyboardEvent) {
+      // Escape exits capture without persisting anything — matches the
+      // editorial brief's "every action is reachable by keyboard."
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setCapturing(false);
+        return;
+      }
       // Ignore plain modifier-only keydowns; wait for the actual chord.
       if (e.key === "Meta" || e.key === "Shift" || e.key === "Alt" || e.key === "Control") {
         return;
