@@ -15,6 +15,8 @@ pub mod keychain;
 mod models;
 mod permissions;
 mod settings;
+mod sounds;
+mod tray;
 mod window;
 
 /// Test-only re-exports.
@@ -33,13 +35,37 @@ use app::{AppState, DictationController};
 use hotkey::listener::HotkeyManager;
 use tauri::Manager;
 use tracing::{error, info, warn};
+use tracing_subscriber::prelude::*;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("wispertype=info")),
+    // --- File logger setup ---
+    // Rolling daily log to ~/Library/Logs/wispertype/wispertype.log.YYYY-MM-DD
+    // The non-blocking writer guard must outlive the program. Binding it to a
+    // `let` inside `run()` is safe because `tauri::Builder::run()` blocks
+    // until quit — the binding is live for the entire app lifetime.
+    let log_dir = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("Library/Logs/wispertype");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "wispertype.log");
+    let (non_blocking_file, _file_guard) = tracing_appender::non_blocking(file_appender);
+
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("wispertype=info"));
+
+    // Stdout layer (existing dev experience) + file layer.
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_filter(env_filter.clone()),
+        )
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(non_blocking_file)
+                .with_ansi(false)
+                .with_filter(env_filter),
         )
         .init();
 
@@ -58,6 +84,7 @@ pub fn run() {
             commands::open_system_settings,
             commands::open_path,
             commands::resolve_log_path,
+            commands::open_log_dir,
             commands::set_api_key,
             commands::clear_api_key,
             commands::test_engine,
@@ -96,6 +123,13 @@ pub fn run() {
                     "failed to register hotkey (input monitoring permission?)"
                 );
             }
+
+            // Build the menu bar tray icon. Removes the need for the static
+            // `trayIcon` conf entry (which would create a second icon).
+            if let Err(e) = tray::build(app.handle()) {
+                warn!(?e, "tray icon build failed (non-fatal)");
+            }
+
             Ok(())
         })
         .run(tauri::generate_context!())

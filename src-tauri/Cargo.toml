@@ -11,7 +11,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
+tauri = { version = "2", features = ["macos-private-api", "tray-icon", "image-png"] }
 tauri-plugin-store = "2"
 tauri-plugin-global-shortcut = "2"
 
@@ -30,6 +30,7 @@ serde_json = "1"
 # logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 
 # audio capture + ring buffer
 cpal = "0.15"
@@ -43,6 +44,7 @@ objc2-app-kit = { version = "0.2", features = [
     "NSEvent",
     "NSScreen",
     "NSWorkspace",
+    "NSSound",
 ] }
 objc2-foundation = { version = "0.2", features = [
     "NSGeometry",
