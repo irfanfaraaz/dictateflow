@@ -36,7 +36,7 @@ pub enum PermissionState {
     NotRequested,
 }
 
-/// Three permissions wispertype needs, each with its own System Settings pane.
+/// Three permissions DictateFlow needs, each with its own System Settings pane.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionKind {
@@ -63,7 +63,7 @@ extern "C" {
 }
 
 /// Real probe: `AXIsProcessTrusted` is `true` once the user has added the
-/// wispertype binary to System Settings → Privacy & Security →
+/// DictateFlow binary to System Settings → Privacy & Security →
 /// Accessibility. AX only reports trusted vs not-trusted — it never
 /// distinguishes "denied" from "never asked" — so we collapse not-trusted
 /// into `NotRequested` to surface a single "open settings" CTA.
@@ -75,6 +75,26 @@ pub fn check_accessibility() -> PermissionState {
     } else {
         PermissionState::NotRequested
     }
+}
+
+#[link(name = "ApplicationServices", kind = "framework")]
+extern "C" {
+    fn AXIsProcessTrustedWithOptions(options: *const std::ffi::c_void) -> u8;
+}
+
+/// Check accessibility and show the system prompt if not yet trusted.
+/// Returns true if already trusted, false if the prompt was shown.
+pub fn request_accessibility() -> bool {
+    use core_foundation::base::TCFType;
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::string::CFString;
+
+    let key = CFString::new("AXTrustedCheckOptionPrompt");
+    let value = CFBoolean::true_value();
+    let pairs: Vec<(CFString, CFBoolean)> = vec![(key, value)];
+    let opts = CFDictionary::from_CFType_pairs(&pairs);
+    (unsafe { AXIsProcessTrustedWithOptions(opts.as_concrete_TypeRef() as *const _) }) != 0
 }
 
 // ----------------------------------------------------------------------

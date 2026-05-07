@@ -1,10 +1,10 @@
 [package]
-name = "wispertype"
+name = "dictateflow"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "wispertype_lib"
+name = "dictateflow_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -54,6 +54,7 @@ objc2-foundation = { version = "0.2", features = [
     "NSThread",
 ] }
 core-graphics = "0.24"
+core-foundation = "0.10"
 
 # whisper.cpp via whisper-rs (Metal acceleration on Apple Silicon)
 whisper-rs = { version = "0.13", features = ["metal"] }

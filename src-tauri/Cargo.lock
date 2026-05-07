@@ -770,6 +770,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "dictateflow"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "async-trait",
+ "base64 0.22.1",
+ "core-foundation 0.10.1",
+ "core-graphics 0.24.0",
+ "cpal",
+ "dirs 5.0.1",
+ "futures",
+ "hound",
+ "objc2 0.5.2",
+ "objc2-app-kit 0.2.2",
+ "objc2-foundation 0.2.2",
+ "reqwest 0.12.28",
+ "ringbuf",
+ "security-framework 2.11.1",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-global-shortcut",
+ "tauri-plugin-store",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "url",
+ "whisper-rs",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5965,43 +6003,6 @@ checksum = "cb5a765337c50e9ec252c2069be9bf91c7df47afb103b642ba3a53bf8101be97"
 dependencies = [
  "cfg-if",
  "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "wispertype"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arboard",
- "async-trait",
- "base64 0.22.1",
- "core-graphics 0.24.0",
- "cpal",
- "dirs 5.0.1",
- "futures",
- "hound",
- "objc2 0.5.2",
- "objc2-app-kit 0.2.2",
- "objc2-foundation 0.2.2",
- "reqwest 0.12.28",
- "ringbuf",
- "security-framework 2.11.1",
- "serde",
- "serde_json",
- "sha2",
- "tauri",
- "tauri-build",
- "tauri-plugin-global-shortcut",
- "tauri-plugin-store",
- "thiserror 1.0.69",
- "tokio",
- "tokio-tungstenite",
- "tokio-util",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "url",
- "whisper-rs",
 ]
 
 [[package]]

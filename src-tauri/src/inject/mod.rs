@@ -24,9 +24,8 @@ pub mod keystroke;
 
 use std::time::Duration;
 
+use tracing::warn;
 use thiserror::Error;
-
-use guard::ClipboardGuard;
 
 /// Errors emitted by the inject pipeline.
 ///
@@ -39,7 +38,7 @@ pub enum InjectError {
     Clipboard(#[from] arboard::Error),
 
     /// CoreGraphics keystroke synthesis failed. Most common cause: the
-    /// Accessibility permission has not been granted to wispertype.
+    /// Accessibility permission has not been granted to DictateFlow.
     #[error("CGEvent error: {0}")]
     Cgevent(String),
 }
@@ -66,9 +65,9 @@ pub async fn paste(text: &str) -> Result<(), InjectError> {
         "inject::paste called with empty text — caller must filter"
     );
 
-    // SAFETY-OF-INVARIANT: the guard MUST be bound to a name. `let _ = …`
-    // would drop it immediately, racing the paste against the restore.
-    let _guard = ClipboardGuard::save()?;
+    if !crate::permissions::request_accessibility() {
+        warn!("accessibility not granted — synthetic ⌘V will be silently dropped by macOS");
+    }
 
     clipboard::set_text(text)?;
 
@@ -84,5 +83,4 @@ pub async fn paste(text: &str) -> Result<(), InjectError> {
         .map_err(|e| InjectError::Cgevent(format!("join: {e}")))??;
 
     Ok(())
-    // _guard drops here → restore scheduled +250 ms.
 }
