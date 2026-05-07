@@ -31,6 +31,27 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# audio capture + ring buffer
+cpal = "0.15"
+ringbuf = "0.4"
+
+# macOS interop (NSWindow click-through, NSEvent cursor, NSWorkspace deep-links)
+objc2 = "0.5"
+objc2-app-kit = { version = "0.2", features = [
+    "NSWindow",
+    "NSResponder",
+    "NSEvent",
+    "NSScreen",
+    "NSWorkspace",
+] }
+objc2-foundation = { version = "0.2", features = [
+    "NSGeometry",
+    "NSString",
+    "NSURL",
+    "NSArray",
+] }
+core-graphics = "0.24"
+
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
