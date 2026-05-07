@@ -31,6 +31,8 @@ use crate::audio::vad::{SilenceDetector, VadConfig};
 use crate::engine::{factory, AudioChunk, Engine, EngineError};
 use crate::inject;
 use crate::settings::SettingsStore;
+use crate::sounds;
+use crate::tray::{self, TrayState};
 use crate::window;
 
 // ---------- Event names ----------
@@ -163,16 +165,27 @@ const ENGINE_CHANNEL_CAPACITY: usize = 64;
 pub async fn start_dictation<R: Runtime>(app: &AppHandle<R>) -> Result<DictationSession> {
     use crate::settings::schema::EngineKind;
 
-    // 0a. Guard: local engine with no installed models → no-op.
+    // 0a. Guard: local engine with no installed models → emit error chip and bail.
     //
     // `LocalEngine::load` would return `ModelNotInstalled` anyway, but we
-    // short-circuit here so the pill never flashes and no error event is
-    // emitted. Phase 9 wires up the error chip; for now we just warn + bail.
+    // short-circuit here so the pill shows the error chip without needing to
+    // start capture. The pill auto-shows on `dictation:error` (see Pill.tsx).
     let (engine_kind, cap_seconds) = {
         let store = app.state::<SettingsStore>();
         let settings = store.get();
         if settings.engine == EngineKind::Local && settings.local.installed_models.is_empty() {
-            warn!("start_dictation: local engine selected but no models installed — ignoring");
+            warn!("start_dictation: local engine selected but no models installed");
+            let payload = ErrorPayload {
+                code: "model_not_installed",
+                message: "No model installed. Download a model in Settings → Models.".into(),
+                recovery_hint: Some("open settings → models to download a model".into()),
+            };
+            if let Err(e) = app.emit(EV_DICTATION_ERROR, payload) {
+                warn!(?e, "emit dictation:error (no model) failed");
+            }
+            if let Err(e) = tray::set_state(app, TrayState::Error) {
+                warn!(?e, "tray set_state Error (no model) failed");
+            }
             return Err(anyhow!("no model installed"));
         }
         let cap = match settings.engine {
@@ -194,6 +207,17 @@ pub async fn start_dictation<R: Runtime>(app: &AppHandle<R>) -> Result<Dictation
 
     // 2. Show the pill (must hop to the macOS main thread).
     show_pill_async(app);
+
+    // 2a. Tray → Listening + optional start sound.
+    if let Err(e) = tray::set_state(app, TrayState::Listening) {
+        warn!(?e, "tray set_state Listening failed");
+    }
+    {
+        let store = app.state::<SettingsStore>();
+        if store.get().sounds.start_enabled {
+            sounds::play_start(app);
+        }
+    }
 
     // 3. Tell the frontend we've begun. Include the cap so the pill can
     //    display `mm:ss / cap` and compute the 80% warning threshold.
@@ -355,6 +379,17 @@ pub async fn start_dictation<R: Runtime>(app: &AppHandle<R>) -> Result<Dictation
                         } else {
                             match inject::paste(&p.text).await {
                                 Ok(()) => {
+                                    // Play stop sound on successful injection.
+                                    {
+                                        let store = app_for_engine.try_state::<SettingsStore>();
+                                        if store
+                                            .as_ref()
+                                            .map(|s| s.get().sounds.stop_enabled)
+                                            .unwrap_or(false)
+                                        {
+                                            sounds::play_stop(&app_for_engine);
+                                        }
+                                    }
                                     if let Err(e) = app_for_engine.emit(
                                         EV_DICTATION_INJECTED,
                                         InjectedPayload {
@@ -367,6 +402,11 @@ pub async fn start_dictation<R: Runtime>(app: &AppHandle<R>) -> Result<Dictation
                                 }
                                 Err(e) => {
                                     warn!(?e, "inject::paste failed");
+                                    if let Err(te) =
+                                        tray::set_state(&app_for_engine, TrayState::Error)
+                                    {
+                                        warn!(?te, "tray set_state Error (inject fail) failed");
+                                    }
                                     let payload = ErrorPayload {
                                         code: "inject_failed",
                                         message: e.to_string(),
@@ -393,6 +433,9 @@ pub async fn start_dictation<R: Runtime>(app: &AppHandle<R>) -> Result<Dictation
                 }
                 Err(e) => {
                     warn!(?e, "engine yielded error");
+                    if let Err(te) = tray::set_state(&app_for_engine, TrayState::Error) {
+                        warn!(?te, "tray set_state Error (engine error) failed");
+                    }
                     emit_error(&app_for_engine, &e);
                 }
             }
@@ -493,6 +536,12 @@ pub async fn stop_dictation<R: Runtime>(app: &AppHandle<R>, session: DictationSe
     // Brief overlap with the pill's "pasting…" beat before fade-out.
     tokio::time::sleep(PILL_HIDE_DELAY).await;
     hide_pill_async(app);
+
+    // Revert tray to Idle. The error auto-revert path already does this for
+    // error states; this covers the normal stop path.
+    if let Err(e) = tray::set_state(app, TrayState::Idle) {
+        warn!(?e, "tray set_state Idle (stop) failed");
+    }
 }
 
 /// Pump RMS values from the watch channel out as `dictation:audio_level`
@@ -573,6 +622,9 @@ async fn ensure_engine_loaded<R: Runtime>(app: &AppHandle<R>) -> Result<Arc<dyn 
 }
 
 fn emit_error<R: Runtime>(app: &AppHandle<R>, err: &EngineError) {
+    if let Err(e) = tray::set_state(app, TrayState::Error) {
+        warn!(?e, "tray set_state Error failed");
+    }
     let code: &'static str = match err {
         EngineError::MissingApiKey => "missing_api_key",
         EngineError::ModelNotInstalled(_) => "model_not_installed",
