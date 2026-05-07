@@ -9,6 +9,7 @@ mod engine;
 mod error;
 mod events;
 mod hotkey;
+mod inject;
 mod models;
 mod permissions;
 mod window;

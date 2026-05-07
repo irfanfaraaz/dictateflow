@@ -62,6 +62,9 @@ hound = "3.5"
 # Resource resolution for the bundled GGML model
 dirs = "5"
 
+# Clipboard read/write for Phase 3 paste injection
+arboard = "3.4"
+
 [dev-dependencies]
 sha2 = "0.10"
 
