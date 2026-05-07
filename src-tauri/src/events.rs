@@ -27,6 +27,7 @@ use tracing::{debug, info, warn};
 
 use crate::app::{AppState, DictationSession};
 use crate::audio::capture;
+use crate::audio::vad::{SilenceDetector, VadConfig};
 use crate::engine::{factory, AudioChunk, Engine, EngineError};
 use crate::inject;
 use crate::settings::SettingsStore;
@@ -184,14 +185,44 @@ pub async fn start_dictation<R: Runtime>(app: &AppHandle<R>) -> Result<Dictation
         warn!(?e, "emit dictation:start failed");
     }
 
-    // 4. Spawn the 30 Hz level pump (drives the pill waveform).
+    // 4a. Spawn the 30 Hz level pump (drives the pill waveform).
     let app_for_levels = app.clone();
+    // Clone level_rx before moving into level_pump so the VAD task can also
+    // observe RMS values independently. Both clones see every published value.
+    let vad_level_rx = level_rx.clone();
     let level_pump = tokio::spawn(level_pump(app_for_levels, level_rx));
+
+    // 4b. Spawn the VAD task. Watches RMS from the same watch channel and calls
+    //     `audio_stop.cancel()` when sustained silence is detected. This
+    //     triggers the same clean teardown path as the user releasing the
+    //     hotkey: audio_pump drains + drops audio_tx → engine sees EOF →
+    //     finalises and emits is_final=true.
+    //
+    //     If the user releases the hotkey before VAD fires, `stop_dictation`
+    //     aborts the task (idempotent: audio_stop is already cancelled or will
+    //     be cancelled by stop_dictation's own path).
 
     // 5. Build the engine pipeline: audio_pump → mpsc → engine.stream → emit.
     let cancel = CancellationToken::new();
     let audio_stop = CancellationToken::new();
     let (audio_tx, audio_rx) = mpsc::channel::<AudioChunk>(ENGINE_CHANNEL_CAPACITY);
+
+    let audio_stop_for_vad = audio_stop.clone();
+    let vad_task = tokio::spawn(async move {
+        let mut detector = SilenceDetector::new(VadConfig::default());
+        let mut rx = vad_level_rx;
+        // `changed()` returns Err when the sender (capture) is dropped —
+        // means audio stopped, so we exit cleanly.
+        while rx.changed().await.is_ok() {
+            let rms = *rx.borrow_and_update();
+            let event = detector.observe(rms, std::time::Instant::now());
+            if event == crate::audio::vad::SilenceEvent::SustainedSilence {
+                debug!("VAD: sustained silence detected — triggering early stop");
+                audio_stop_for_vad.cancel();
+                return;
+            }
+        }
+    });
 
     // Audio pump: copy from cpal ringbuf into the mpsc every
     // AUDIO_PUMP_INTERVAL. Exits when `audio_stop` fires (after one final
@@ -315,6 +346,7 @@ pub async fn start_dictation<R: Runtime>(app: &AppHandle<R>) -> Result<Dictation
         level_pump,
         audio_pump,
         engine_pump,
+        vad_task,
         audio_stop,
         cancel,
     ))
@@ -356,6 +388,7 @@ pub async fn stop_dictation<R: Runtime>(app: &AppHandle<R>, session: DictationSe
         level_pump,
         audio_pump,
         engine_pump,
+        vad_task,
         audio_stop,
         cancel,
     } = session;
@@ -364,8 +397,11 @@ pub async fn stop_dictation<R: Runtime>(app: &AppHandle<R>, session: DictationSe
     //    ringbuf contents on its way out.
     drop(capture);
 
-    // 2. Stop the level event emitter — the watch channel is dead now.
+    // 2. Stop the level event emitter and the VAD task — watch channel is
+    //    dead now (capture dropped). Aborting is idempotent if VAD already
+    //    triggered early-stop on its own.
     level_pump.abort();
+    vad_task.abort();
 
     // 3. Give the cpal callback a tick to land its final buffer in the
     //    ringbuf, then signal the audio pump to drain + exit. The pump

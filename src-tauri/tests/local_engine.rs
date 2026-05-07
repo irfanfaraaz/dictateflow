@@ -76,6 +76,79 @@ mod hex {
     }
 }
 
+/// Streaming test: feed audio in 250 ms increments and assert that at least
+/// one intermediate (`is_final = false`) partial is emitted before the final.
+///
+/// Ignored for the same reason as `local_engine_transcribes_jfk`: requires the
+/// downloaded model. Run with `--ignored` locally.
+#[tokio::test]
+#[ignore = "requires ggml-small.bin in ~/Library/Application Support/com.wispertype.app/models/ — see scripts/download-model.sh"]
+async fn streaming_emits_intermediate_partials_before_final() {
+    let model = dev_model_path();
+    if !model.exists() {
+        panic!(
+            "model missing: {} — run scripts/download-model.sh",
+            model.display()
+        );
+    }
+
+    let engine = LocalEngine::load(&model).expect("load engine");
+
+    let (tx, rx) = mpsc::channel::<AudioChunk>(64);
+    let cancel = CancellationToken::new();
+
+    // Feed audio in 250 ms increments (4_000 samples) over a background task.
+    // The streaming engine fires an intermediate inference after every 16_000
+    // samples (= 1 s), so after 4 chunks (1 s) we should see a partial.
+    let samples = decode_jfk_samples();
+    let tx_for_feeder = tx.clone();
+    tokio::spawn(async move {
+        const CHUNK_SAMPLES: usize = 16_000 / 4; // 250 ms at 16 kHz
+        for chunk in samples.chunks(CHUNK_SAMPLES) {
+            if tx_for_feeder
+                .send(AudioChunk {
+                    samples: chunk.to_vec(),
+                })
+                .await
+                .is_err()
+            {
+                break;
+            }
+            // Simulate real-time pacing so the engine has time to fire windows.
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        drop(tx_for_feeder);
+    });
+    // Drop the original tx so the channel closes after the feeder drops its clone.
+    drop(tx);
+
+    let mut stream = engine.stream(rx, cancel).await.expect("engine.stream");
+
+    let mut saw_intermediate = false;
+    let mut final_text = String::new();
+
+    while let Some(item) = stream.next().await {
+        let p = item.expect("partial");
+        if p.is_final {
+            final_text = p.text;
+            break;
+        } else {
+            saw_intermediate = true;
+        }
+    }
+
+    assert!(
+        saw_intermediate,
+        "expected at least one is_final=false partial before the final"
+    );
+
+    let lower = final_text.to_lowercase();
+    assert!(
+        lower.contains("country") || lower.contains("ask") || lower.contains("americans"),
+        "transcript missing expected keywords; got: {final_text:?}"
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires ggml-small.bin in ~/Library/Application Support/com.wispertype.app/models/ — see scripts/download-model.sh"]
 async fn local_engine_transcribes_jfk() {

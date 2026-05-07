@@ -102,6 +102,9 @@ pub struct DictationSession {
     pub(crate) audio_pump: JoinHandle<()>,
     /// Drains the engine's partial stream and emits Tauri events.
     pub(crate) engine_pump: JoinHandle<()>,
+    /// Watches RMS levels and triggers early-stop on sustained silence (Phase 6).
+    /// Calls `audio_stop.cancel()` when `SilenceDetector` fires `SustainedSilence`.
+    pub(crate) vad_task: JoinHandle<()>,
     /// Signals the audio pump to drain residual samples and exit. Distinct
     /// from `cancel` because end-of-dictation is a *clean* stream-close, not
     /// an abort.
@@ -111,11 +114,13 @@ pub struct DictationSession {
 }
 
 impl DictationSession {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         capture: CaptureSession,
         level_pump: JoinHandle<()>,
         audio_pump: JoinHandle<()>,
         engine_pump: JoinHandle<()>,
+        vad_task: JoinHandle<()>,
         audio_stop: CancellationToken,
         cancel: CancellationToken,
     ) -> Self {
@@ -124,6 +129,7 @@ impl DictationSession {
             level_pump,
             audio_pump,
             engine_pump,
+            vad_task,
             audio_stop,
             cancel,
         }

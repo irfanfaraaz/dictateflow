@@ -1,10 +1,21 @@
 //! `LocalEngine` — whisper.cpp via whisper-rs (Metal-accelerated on Apple Silicon).
 //!
-//! Phase 2 ships a *batch* implementation: we drain the audio receiver into a
-//! `Vec<f32>` until end-of-stream (sender dropped) or cancellation, then run
-//! `WhisperState::full(...)` once on the accumulated buffer and emit a single
-//! `Partial { is_final: true }`. Phase 6 replaces this with a sliding-window
-//! streaming loop (intermediate partials every ~1 s).
+//! Phase 2 shipped a *batch* implementation (drain all audio, run one inference
+//! at end-of-stream). Phase 6 replaces that with a **sliding-window streaming**
+//! loop:
+//!
+//! - Every ~1 000 ms of new audio the engine runs a fresh `state.full(...)` on
+//!   the full accumulated buffer (not a delta) and emits `Partial { is_final:
+//!   false }`.
+//! - Each inference runs on `tokio::task::spawn_blocking` (non-negotiable —
+//!   see CLAUDE.md hard rules). Only one blocking task is in-flight at a time;
+//!   if the previous task hasn't finished when the next tick arrives, we skip
+//!   that window silently.
+//! - Exit conditions trigger a final inference:
+//!   - audio sender dropped (end-of-hold-to-talk)
+//!   - `cancel` token fired (cancel-on-restart, Phase 9)
+//!   - VAD reports sustained silence (audio_stop → audio_tx drop → channel
+//!     closed in the events layer — same as normal stop)
 //!
 //! # The WhisperContext-once pattern
 //!
@@ -12,7 +23,7 @@
 //! init). whisper.cpp's recommended pattern is to load the *context* exactly
 //! once per process and create a fresh *state* per inference. We expose that
 //! by holding `Arc<WhisperContext>` inside `LocalEngine` and calling
-//! `ctx.create_state()` inside the per-dictation `spawn_blocking` task.
+//! `ctx.create_state()` inside each `spawn_blocking` task.
 //!
 //! # Why `spawn_blocking`
 //!
@@ -24,15 +35,24 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
-use futures::stream::{self, BoxStream, StreamExt};
+use futures::channel::mpsc as futures_mpsc;
+use futures::stream::BoxStream;
+use futures::SinkExt as _;
+use futures::StreamExt as _;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 use super::{AudioChunk, Engine, EngineError, EngineResult, Partial};
+
+/// How often (in terms of buffered audio duration) to run an intermediate
+/// inference. The window is measured as "new samples added since last
+/// inference" so it tracks audio duration, not wall clock.
+const INFERENCE_WINDOW_SAMPLES: usize = 16_000; // = 1 s at 16 kHz
 
 /// Loaded whisper.cpp context. Cheap to clone (it's an `Arc` internally)
 /// and safe to share across dictations.
@@ -107,63 +127,165 @@ impl Engine for LocalEngine {
     ) -> EngineResult<BoxStream<'static, EngineResult<Partial>>> {
         let ctx = self.ctx.clone();
 
-        // 1. Drain audio receiver in the async layer (we don't want to hold
-        //    the blocking pool slot while waiting on IPC).
+        // We produce partials incrementally. Use a `futures::channel::mpsc`
+        // so the receiver side implements `futures::Stream` directly and can
+        // be boxed without a new crate dependency.
         //
-        //    Exit conditions:
-        //    - sender dropped (`recv()` returns None) → clean end-of-stream;
-        //      run inference on whatever we collected.
-        //    - cancel fired → abort with `EngineError::Cancelled`. The
-        //      controller uses this for cancel-on-restart (Phase 9). The
-        //      *normal* end of a hold-to-talk dictation is sender-drop, NOT
-        //      cancellation.
-        //
-        //    Drainage runs on the runtime, but it's all tiny copies — no
-        //    inference yet. Inference is a single `spawn_blocking` at the
-        //    end (Phase 2 batch semantics).
-        let mut buffer: Vec<f32> = Vec::with_capacity(16_000 * 30); // 30 s
-        let cancelled = loop {
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => break true,
-                maybe_chunk = audio.recv() => match maybe_chunk {
-                    Some(chunk) => buffer.extend_from_slice(&chunk.samples),
-                    None => break false,
-                },
+        // Buffer of 32: each window takes ~1 s of audio; the consumer
+        // (engine_pump in events.rs) pulls these out immediately, so the
+        // queue stays near-empty.
+        let (mut tx, rx) = futures_mpsc::channel::<EngineResult<Partial>>(32);
+
+        // Spawn the streaming loop as a Tokio task so `stream()` returns
+        // promptly and partials flow out over time.
+        tokio::spawn(async move {
+            // Accumulate all audio for the session.
+            let mut buffer: Vec<f32> = Vec::with_capacity(16_000 * 30); // 30 s
+                                                                        // How many samples were in the buffer at the last inference.
+            let mut last_inference_sample_count: usize = 0;
+            // Track an in-flight spawn_blocking handle. `None` = available.
+            let mut inflight: Option<tokio::task::JoinHandle<EngineResult<Partial>>> = None;
+            // Whether the audio stream has ended (sender dropped).
+            let mut stream_ended = false;
+            // Whether cancellation was requested.
+            let mut cancelled = false;
+
+            // ----------------------------------------------------------------
+            // Streaming receive loop
+            // ----------------------------------------------------------------
+            'recv: loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        cancelled = true;
+                        break 'recv;
+                    }
+                    maybe_chunk = audio.recv() => {
+                        match maybe_chunk {
+                            Some(chunk) => {
+                                buffer.extend_from_slice(&chunk.samples);
+
+                                let new_samples = buffer.len() - last_inference_sample_count;
+                                if new_samples >= INFERENCE_WINDOW_SAMPLES {
+                                    // Try to fire an intermediate inference if none is in-flight.
+                                    let can_fire = inflight
+                                        .as_ref()
+                                        .map(|h| h.is_finished())
+                                        .unwrap_or(true);
+
+                                    if can_fire {
+                                        // Collect the result of the previous handle if it finished.
+                                        if let Some(prev) = inflight.take() {
+                                            match prev.await {
+                                                Ok(Ok(p)) => {
+                                                    debug!(
+                                                        text = %p.text,
+                                                        "local engine: intermediate partial"
+                                                    );
+                                                    if tx.send(Ok(p)).await.is_err() {
+                                                        // Consumer dropped — stop producing.
+                                                        break 'recv;
+                                                    }
+                                                }
+                                                Ok(Err(e)) => {
+                                                    warn!(?e, "intermediate inference failed — skipping window");
+                                                }
+                                                Err(e) => {
+                                                    warn!(?e, "spawn_blocking join error on intermediate window");
+                                                }
+                                            }
+                                        }
+
+                                        last_inference_sample_count = buffer.len();
+                                        let snapshot = buffer.clone();
+                                        let ctx2 = ctx.clone();
+                                        inflight = Some(tokio::task::spawn_blocking(move || {
+                                            run_window(&ctx2, snapshot, false)
+                                        }));
+                                    }
+                                    // else: inference already running, skip this window.
+                                }
+                            }
+                            None => {
+                                // Sender dropped → clean end-of-stream.
+                                stream_ended = true;
+                                break 'recv;
+                            }
+                        }
+                    }
+                }
             }
-        };
 
-        debug!(
-            samples = buffer.len(),
-            seconds = buffer.len() as f32 / 16_000.0,
-            cancelled,
-            "local engine: audio drained, dispatching to spawn_blocking"
-        );
+            // ----------------------------------------------------------------
+            // Drain any still-running intermediate inference.
+            // ----------------------------------------------------------------
+            if let Some(prev) = inflight.take() {
+                // Don't await if cancelled — just drop the handle.
+                if !cancelled {
+                    match prev.await {
+                        Ok(Ok(p)) => {
+                            debug!(text = %p.text, "local engine: flushing final intermediate partial");
+                            let _ = tx.send(Ok(p)).await;
+                        }
+                        Ok(Err(e)) => warn!(?e, "final intermediate inference failed"),
+                        Err(e) => warn!(?e, "join error flushing intermediate"),
+                    }
+                }
+            }
 
-        if cancelled {
-            return Ok(stream::iter(vec![Err(EngineError::Cancelled)]).boxed());
-        }
+            // ----------------------------------------------------------------
+            // Final step.
+            // ----------------------------------------------------------------
+            if cancelled {
+                let _ = tx.send(Err(EngineError::Cancelled)).await;
+                return;
+            }
 
-        if buffer.is_empty() {
-            // Nothing to transcribe — emit a final empty Partial so the
-            // controller can still advance its state machine.
-            return Ok(stream::iter(vec![Ok(Partial {
-                text: String::new(),
-                is_final: true,
-                confidence: None,
-            })])
-            .boxed());
-        }
+            if !stream_ended {
+                // Shouldn't happen (loop only breaks on None or cancel), but
+                // be defensive.
+                warn!("local engine: recv loop exited unexpectedly — treating as end-of-stream");
+            }
 
-        // 2. Run inference on the blocking pool. `spawn_blocking` is the
-        //    canonical way to call sync code from an async runtime — see
-        //    JOURNEY §05.
-        let result = tokio::task::spawn_blocking(move || run_full(&ctx, buffer))
-            .await
-            .map_err(|e| EngineError::Inference(format!("blocking task: {e}")))?;
+            if buffer.is_empty() {
+                // Nothing to transcribe — emit a final empty Partial so the
+                // controller can still advance its state machine.
+                let _ = tx
+                    .send(Ok(Partial {
+                        text: String::new(),
+                        is_final: true,
+                        confidence: None,
+                    }))
+                    .await;
+                return;
+            }
 
-        let partial = result?;
-        Ok(stream::iter(vec![Ok(partial)]).boxed())
+            debug!(
+                samples = buffer.len(),
+                seconds = buffer.len() as f32 / 16_000.0,
+                "local engine: running final inference"
+            );
+
+            let ctx_final = ctx.clone();
+            let final_result =
+                tokio::task::spawn_blocking(move || run_window(&ctx_final, buffer, true)).await;
+
+            match final_result {
+                Ok(Ok(p)) => {
+                    let _ = tx.send(Ok(p)).await;
+                }
+                Ok(Err(e)) => {
+                    let _ = tx.send(Err(e)).await;
+                }
+                Err(e) => {
+                    let _ = tx
+                        .send(Err(EngineError::Inference(format!("blocking task: {e}"))))
+                        .await;
+                }
+            }
+        });
+
+        Ok(rx.boxed())
     }
 
     async fn health_check(&self) -> EngineResult<()> {
@@ -174,10 +296,17 @@ impl Engine for LocalEngine {
     }
 }
 
-/// Run a single batch of `state.full(...)` and concatenate every segment's
-/// text into one transcript. Caller is responsible for ensuring `samples` is
-/// 16 kHz mono f32.
-fn run_full(ctx: &WhisperContext, samples: Vec<f32>) -> EngineResult<Partial> {
+/// Run whisper inference on `samples` (full accumulated buffer) and return a
+/// `Partial`. `is_final` is forwarded directly into the returned `Partial`.
+///
+/// Caller must run this inside `tokio::task::spawn_blocking` — it is
+/// synchronous and CPU/GPU-heavy. Never call from the async runtime.
+///
+/// Uses the FULL buffer on every call (not a delta) because whisper.cpp's
+/// segment boundaries shift as the buffer grows; re-processing from the start
+/// gives coherent, stable transcripts.
+fn run_window(ctx: &WhisperContext, samples: Vec<f32>, is_final: bool) -> EngineResult<Partial> {
+    let _start = Instant::now();
     let mut state = ctx
         .create_state()
         .map_err(|e| EngineError::Inference(format!("create_state: {e}")))?;
@@ -205,9 +334,16 @@ fn run_full(ctx: &WhisperContext, samples: Vec<f32>) -> EngineResult<Partial> {
     }
 
     let text = text.trim().to_string();
+    debug!(
+        elapsed_ms = _start.elapsed().as_millis(),
+        segments = n_segments,
+        is_final,
+        "whisper inference complete"
+    );
+
     Ok(Partial {
         text,
-        is_final: true,
+        is_final,
         confidence: None,
     })
 }
