@@ -5,11 +5,25 @@
 
 mod app;
 mod audio;
+mod engine;
 mod error;
 mod events;
 mod hotkey;
+mod models;
 mod permissions;
 mod window;
+
+/// Test-only re-exports.
+///
+/// Integration tests under `src-tauri/tests/` cannot reach into the crate's
+/// private modules, but exposing engine internals as `pub` from `lib.rs`
+/// would invite frontend code to import them too. This `#[doc(hidden)]`
+/// module is the compromise: it is technically `pub`, but explicitly named
+/// `__test_only` so callers know it's not a stability surface.
+#[doc(hidden)]
+pub mod __test_only {
+    pub use crate::engine::{local::LocalEngine, AudioChunk, Engine, EngineError, Partial};
+}
 
 use app::{AppState, DictationController};
 use tauri::Manager;
