@@ -1,0 +1,25 @@
+# Rust
+target/
+**/*.rs.bk
+*.pdb
+
+# Node
+node_modules/
+dist/
+dist-ssr/
+.vite/
+
+# Build artifacts
+src-tauri/target/
+src-tauri/gen/
+src-tauri/WixTools/
+
+# Editor
+.vscode/
+.idea/
+.DS_Store
+*.log
+
+# Env
+.env
+.env.local
