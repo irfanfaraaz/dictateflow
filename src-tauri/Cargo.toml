@@ -65,6 +65,9 @@ dirs = "5"
 # Clipboard read/write for Phase 3 paste injection
 arboard = "3.4"
 
+# macOS Keychain (Phase 7.1: BYOK secret storage)
+security-framework = "2"
+
 [dev-dependencies]
 sha2 = "0.10"
 
