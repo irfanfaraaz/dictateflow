@@ -8,14 +8,16 @@ Press a hotkey, talk, release. Your speech is transcribed via ElevenLabs Scribe 
 
 Grab the latest `.dmg` from [**Releases**](https://github.com/irfanfaraaz/dictateflow/releases).
 
-> **macOS Gatekeeper warning** — DictateFlow is not yet code-signed or notarized, so macOS will block it on first launch. To open it:
+> **macOS Gatekeeper warning** — DictateFlow is not yet code-signed, so macOS will block it on first launch. To open it:
 >
 > 1. Open the `.dmg` and drag DictateFlow to Applications
-> 2. Try to open DictateFlow — macOS will show "Apple cannot check it for malicious software"
-> 3. Go to **System Settings → Privacy & Security** → scroll down to find the "DictateFlow was blocked" message → click **Open Anyway**
-> 4. Or: right-click the app → **Open** → click **Open** in the dialog
+> 2. Open Terminal and run:
+>    ```bash
+>    xattr -cr /Applications/DictateFlow.app
+>    ```
+> 3. Now open DictateFlow normally
 >
-> You only need to do this once. After that it opens normally.
+> You only need to do this once. The `xattr` command removes the quarantine flag macOS adds to downloaded apps.
 
 ### Requirements
 
