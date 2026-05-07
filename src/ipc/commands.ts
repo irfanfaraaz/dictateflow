@@ -53,3 +53,18 @@ export async function resolveLogPath(): Promise<string> {
   }
   return raw;
 }
+
+/** Save an ElevenLabs API key to the macOS Keychain. */
+export async function setApiKey(key: string): Promise<void> {
+  await invoke("set_api_key", { key });
+}
+
+/** Remove the ElevenLabs API key from Keychain. */
+export async function clearApiKey(): Promise<void> {
+  await invoke("clear_api_key");
+}
+
+/** Run health_check() on the currently-configured engine. Returns true if healthy. */
+export async function testEngine(): Promise<boolean> {
+  return await invoke<boolean>("test_engine");
+}
