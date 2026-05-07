@@ -11,6 +11,7 @@ mod error;
 mod events;
 mod hotkey;
 mod inject;
+pub mod keychain;
 mod models;
 mod permissions;
 mod settings;

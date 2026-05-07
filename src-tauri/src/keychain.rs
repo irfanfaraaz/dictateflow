@@ -1,4 +1,3 @@
-// Phase 7.3 wiring TODO: add `pub mod keychain;` to src/lib.rs
 //! macOS Keychain wrapper for storing API keys (BYOK secrets).
 //!
 //! All secrets live in a generic password keychain item under the
@@ -16,8 +15,6 @@
 //! Apple's Security framework treats "no item exists" as an error code
 //! rather than `Ok(None)`. We translate it into idiomatic `Option`/`()`
 //! shapes here so callers can match on real failures.
-
-#![allow(dead_code)] // wired in Phase 7.3 via the engine factory
 
 use security_framework::passwords::{
     delete_generic_password, get_generic_password, set_generic_password,
