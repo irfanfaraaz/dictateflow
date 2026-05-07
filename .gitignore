@@ -8,6 +8,7 @@ node_modules/
 dist/
 dist-ssr/
 .vite/
+*.tsbuildinfo
 
 # Build artifacts
 src-tauri/target/
