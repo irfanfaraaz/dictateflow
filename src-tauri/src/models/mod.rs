@@ -1,13 +1,17 @@
-//! GGML model resolution.
+//! GGML model resolution + download management.
 //!
-//! Phase 2 only needs to *find* the bundled `ggml-small.bin` (or one a
-//! developer dropped into the app data dir). Phase 5 grows this module out
-//! into a full downloader + checksum verifier + catalog with multiple model
-//! sizes; Phase 2's surface is just `resolve_path()`.
-
-#![allow(dead_code)] // catalog entries grow in Phase 5
+//! Phase 2 only needed to *find* the bundled `ggml-small.bin` (or one a
+//! developer dropped into the app data dir). Phase 5 grows this module into
+//! a full downloader + checksum verifier + catalog with multiple model sizes.
+//!
+//! Public surface:
+//! - `catalog` — static model metadata (ids, URLs, SHA-256, sizes).
+//! - `download` — streaming downloader, SHA-256 verifier, file management.
+//! - `resolve_path` — locate an installed model by id (app data dir only
+//!   after Phase 5 removes the bundled resource).
 
 pub mod catalog;
+pub mod download;
 
 use std::path::PathBuf;
 
@@ -25,6 +29,7 @@ use crate::engine::EngineError;
 /// 2. **Bundled resource** — `<resource_dir>/ggml-<id>.bin`. Tauri's
 ///    `PathResolver` returns the location next to the binary inside the
 ///    `.app` bundle (or the dev `target/` directory during `tauri dev`).
+///    Left in for development convenience; not used in production after Phase 5.
 ///
 /// Returns [`EngineError::ModelNotInstalled`] if neither location has the
 /// file.
@@ -53,6 +58,14 @@ pub fn resolve_path<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<PathBuf,
     }
 
     Err(EngineError::ModelNotInstalled(file_name))
+}
+
+/// Returns the `models/` subdirectory inside the app data dir.
+///
+/// This is where the downloader writes files. Does NOT create the directory —
+/// `download::download()` handles that.
+pub fn models_dir<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    app.path().app_data_dir().ok().map(|d| d.join("models"))
 }
 
 #[cfg(test)]

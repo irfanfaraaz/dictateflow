@@ -15,6 +15,7 @@ use anyhow::Context;
 use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
+use tokio_util::sync::CancellationToken;
 
 use crate::error::AppResult;
 use crate::permissions::{self, PermissionKind, PermissionState};
@@ -167,6 +168,215 @@ pub async fn test_engine<R: Runtime>(
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(true)
+}
+
+// ---------- Model management commands (Phase 5) ----------
+
+/// Start downloading a GGML model by catalog id.
+///
+/// Spawns the download on the Tokio runtime. Progress is emitted as
+/// `model:download_progress` events at ~10 Hz; completion emits
+/// `model:download_complete`; failure emits `model:download_error`.
+///
+/// If a download for the same id is already in progress this is a no-op
+/// (the existing download continues unaffected). The caller should check
+/// the in-progress state via the frontend's `useModelDownloads` hook.
+#[tauri::command]
+pub async fn download_model<R: Runtime>(id: String, app: AppHandle<R>) -> AppResult<()> {
+    use crate::app::AppState;
+    use crate::events::{
+        ModelDownloadCompletePayload, ModelDownloadErrorPayload, ModelDownloadProgressPayload,
+        EV_MODEL_DOWNLOAD_COMPLETE, EV_MODEL_DOWNLOAD_ERROR, EV_MODEL_DOWNLOAD_PROGRESS,
+    };
+    use crate::models;
+
+    // Guard: one download per model id.
+    {
+        let state = app
+            .try_state::<AppState>()
+            .ok_or_else(|| anyhow::anyhow!("AppState missing"))?;
+        let mut tokens = match state.download_tokens.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if tokens.contains_key(&id) {
+            // Already downloading — no-op.
+            return Ok(());
+        }
+        let token = CancellationToken::new();
+        tokens.insert(id.clone(), token);
+    }
+
+    let models_dir = models::models_dir(&app)
+        .ok_or_else(|| anyhow::anyhow!("could not resolve app data dir"))?;
+
+    // Clone what the task needs; AppHandle is cheap to clone (Arc inside).
+    let app2 = app.clone();
+    let id2 = id.clone();
+
+    tokio::spawn(async move {
+        let cancel = {
+            let state = match app2.try_state::<AppState>() {
+                Some(s) => s,
+                None => {
+                    tracing::warn!("AppState missing in download task");
+                    return;
+                }
+            };
+            let tokens = match state.download_tokens.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            match tokens.get(&id2) {
+                Some(t) => t.clone(),
+                None => return, // token was already removed (race with cancel)
+            }
+        };
+
+        let app_clone = app2.clone();
+        let id_clone = id2.clone();
+        let result = crate::models::download::download(
+            &id2,
+            models_dir,
+            cancel,
+            move |bytes_done, bytes_total| {
+                let _ = app_clone.emit(
+                    EV_MODEL_DOWNLOAD_PROGRESS,
+                    ModelDownloadProgressPayload {
+                        id: id_clone.clone(),
+                        bytes_done,
+                        bytes_total,
+                    },
+                );
+            },
+        )
+        .await;
+
+        // Remove token regardless of outcome.
+        if let Some(state) = app2.try_state::<AppState>() {
+            let mut tokens = match state.download_tokens.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            tokens.remove(&id2);
+        }
+
+        match result {
+            Ok(_path) => {
+                // Sync installed_models in settings so the Engine tab picker
+                // and the Models tab both see the new model immediately.
+                if let Some(store) = app2.try_state::<crate::settings::SettingsStore>() {
+                    let settings = store.get();
+                    let mut installed = settings.local.installed_models.clone();
+                    if !installed.contains(&id2) {
+                        installed.push(id2.clone());
+                    }
+                    // Sort for stability.
+                    installed.sort();
+                    let patch = json!({"local": {"installed_models": installed}});
+                    if let Ok(next) = store.update_patch(&app2, patch) {
+                        let _ = app2.emit(EV_SETTINGS_UPDATED, next);
+                    }
+                }
+                let _ = app2.emit(
+                    EV_MODEL_DOWNLOAD_COMPLETE,
+                    ModelDownloadCompletePayload { id: id2 },
+                );
+            }
+            Err(e) => {
+                // Cancelled is not an error worth surfacing.
+                if !matches!(e, crate::models::download::DownloadError::Cancelled) {
+                    let _ = app2.emit(
+                        EV_MODEL_DOWNLOAD_ERROR,
+                        ModelDownloadErrorPayload {
+                            id: id2,
+                            message: e.to_string(),
+                        },
+                    );
+                }
+            }
+        }
+    });
+
+    Ok(())
+}
+
+/// Cancel an in-progress model download by id. No-op if none is running.
+#[tauri::command]
+pub async fn cancel_model_download<R: Runtime>(id: String, app: AppHandle<R>) -> AppResult<()> {
+    use crate::app::AppState;
+
+    if let Some(state) = app.try_state::<AppState>() {
+        let tokens = match state.download_tokens.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if let Some(token) = tokens.get(&id) {
+            token.cancel();
+        }
+    }
+    Ok(())
+}
+
+/// Delete an installed GGML model file and sync `installed_models` in settings.
+#[tauri::command]
+pub async fn delete_model<R: Runtime>(
+    id: String,
+    app: AppHandle<R>,
+    store: State<'_, crate::settings::SettingsStore>,
+) -> AppResult<()> {
+    use crate::events::EV_MODEL_DOWNLOAD_COMPLETE; // reuse event for refresh trigger
+    use crate::models;
+
+    let models_dir = models::models_dir(&app)
+        .ok_or_else(|| anyhow::anyhow!("could not resolve app data dir"))?;
+
+    models::download::delete(&id, &models_dir)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // Sync installed_models in settings.
+    let settings = store.get();
+    let installed: Vec<String> = settings
+        .local
+        .installed_models
+        .into_iter()
+        .filter(|m| m != &id)
+        .collect();
+
+    // If active model was deleted, reset to first installed or leave as-is
+    // (engine will return ModelNotInstalled on next dictation — handled there).
+    let next = store
+        .update_patch(&app, json!({"local": {"installed_models": installed}}))
+        .context("sync installed_models after delete")?;
+
+    // Clear engine cache so the next dictation doesn't try to use a gone file.
+    if let Some(state) = app.try_state::<crate::app::AppState>() {
+        state.clear_engine();
+    }
+
+    if let Err(e) = app.emit(EV_SETTINGS_UPDATED, next) {
+        tracing::warn!(?e, "emit settings:updated after delete_model failed");
+    }
+    // Signal the frontend models tab to refresh.
+    let _ = app.emit(
+        EV_MODEL_DOWNLOAD_COMPLETE,
+        crate::events::ModelDownloadCompletePayload { id },
+    );
+
+    Ok(())
+}
+
+/// Return the list of installed model ids by scanning disk and
+/// cross-referencing with the catalog.
+#[tauri::command]
+pub async fn list_installed_models<R: Runtime>(app: AppHandle<R>) -> AppResult<Vec<String>> {
+    use crate::models;
+
+    let models_dir = models::models_dir(&app)
+        .ok_or_else(|| anyhow::anyhow!("could not resolve app data dir"))?;
+
+    Ok(models::download::list_installed(&models_dir).await)
 }
 
 /// Resolve a known app file path the frontend can pass back to `open_path`.

@@ -11,6 +11,7 @@
 
 #![allow(dead_code)] // wired into commands as later phases land
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use tauri::{AppHandle, Runtime};
@@ -27,11 +28,25 @@ use crate::settings::schema::EngineKind;
 /// Holds the last-built engine keyed by its `EngineKind` so that switching
 /// local→scribe (or vice-versa) in Settings invalidates the cache on the
 /// next dictation without requiring an app restart.
-#[derive(Default)]
 pub struct AppState {
     /// `(kind, engine)` — None if no engine has been built yet or the last
     /// build failed. On failure we reset to None so the next F5 press retries.
     engine: Mutex<Option<(EngineKind, Arc<dyn Engine>)>>,
+    /// Active download cancellation tokens keyed by model id.
+    ///
+    /// Inserted BEFORE spawning the download task; removed on completion or
+    /// error. `cancel_model_download` looks up the token here and calls
+    /// `.cancel()` so the streaming loop exits cleanly.
+    pub download_tokens: Mutex<HashMap<String, CancellationToken>>,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            engine: Mutex::new(None),
+            download_tokens: Mutex::new(HashMap::new()),
+        }
+    }
 }
 
 impl AppState {

@@ -31,7 +31,9 @@ impl Default for LocalSettings {
     fn default() -> Self {
         Self {
             model: "small".into(),
-            installed_models: vec!["small".into()],
+            // No bundled model in Phase 5+. `installed_models` starts empty;
+            // the user installs via the Models tab UI downloader.
+            installed_models: vec![],
         }
     }
 }

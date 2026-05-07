@@ -59,6 +59,10 @@ pub fn run() {
             commands::set_api_key,
             commands::clear_api_key,
             commands::test_engine,
+            commands::download_model,
+            commands::cancel_model_download,
+            commands::delete_model,
+            commands::list_installed_models,
         ])
         .setup(|app| {
             // Settings store load happens in setup so the AppHandle is
