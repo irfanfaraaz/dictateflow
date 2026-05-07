@@ -4,6 +4,7 @@
 //! mobile targets can re-use the same setup. We follow the same convention here.
 
 mod app;
+mod audio;
 mod error;
 
 use app::AppState;
