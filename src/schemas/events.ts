@@ -26,9 +26,20 @@ export const errorSchema = z.object({
 });
 export type DictationError = z.infer<typeof errorSchema>;
 
+// PHASE 2 DEBUG ONLY — this schema and the corresponding `dictation:final`
+// pill subscription will be removed in Phase 3 once clipboard injection
+// lands. The shape brief mandates that the pill never renders transcript
+// text in the steady state.
+export const finalSchema = z.object({
+  text: z.string(),
+});
+export type DictationFinal = z.infer<typeof finalSchema>;
+
 export const EVENT = {
   start: "dictation:start",
   audioLevel: "dictation:audio_level",
   injected: "dictation:injected",
   error: "dictation:error",
+  // PHASE 2 DEBUG ONLY — see above.
+  final: "dictation:final",
 } as const;

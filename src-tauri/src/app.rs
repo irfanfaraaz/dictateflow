@@ -2,8 +2,8 @@
 //!
 //! `AppState` is the shared container Tauri threads through `tauri::State`.
 //! `DictationController` owns the cross-task wiring: hotkey down spawns it,
-//! hotkey up tells it to stop. Phase 1 wires it to audio + the pill window;
-//! later phases add the engine + injection layers behind the same surface.
+//! hotkey up tells it to stop. Phase 1 wired audio + the pill window;
+//! Phase 2 adds the engine pipeline (LocalEngine via whisper-rs).
 //!
 //! We avoid `Arc<Mutex<…>>` for cross-task state where possible — the
 //! controller uses an internal `Mutex<Option<Session>>` only at start/stop
@@ -15,19 +15,55 @@ use std::sync::{Arc, Mutex};
 
 use tauri::{AppHandle, Runtime};
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::audio::capture::CaptureSession;
+use crate::engine::Engine;
 
 /// Lazily-initialised in `lib::run::setup`.
+///
+/// Phase 2 holds the loaded `Engine` here. Engines are `Arc<dyn Engine>`
+/// so the dictation flow can clone the handle without locking.
 #[derive(Default)]
 pub struct AppState {
-    // Future fields (engine, settings) land here as they're built.
+    /// Active engine, lazily loaded on first dictation. None if model load
+    /// has not been attempted yet or failed (we surface the failure to the
+    /// frontend via `dictation:error` and reset to None so the next press
+    /// retries).
+    engine: Mutex<Option<Arc<dyn Engine>>>,
 }
 
 impl AppState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Get a handle to the engine, if one is loaded.
+    pub fn engine(&self) -> Option<Arc<dyn Engine>> {
+        match self.engine.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        }
+    }
+
+    /// Install the engine handle. Replaces any existing one.
+    pub fn set_engine(&self, engine: Arc<dyn Engine>) {
+        let mut guard = match self.engine.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        *guard = Some(engine);
+    }
+
+    /// Forget the cached engine (used when load fails so the next dictation
+    /// retries).
+    pub fn clear_engine(&self) {
+        let mut guard = match self.engine.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        *guard = None;
     }
 }
 
@@ -38,19 +74,37 @@ impl AppState {
 pub struct DictationSession {
     pub(crate) capture: CaptureSession,
     pub(crate) level_pump: JoinHandle<()>,
+    /// Pumps samples from the cpal ringbuf into the engine's mpsc.
+    /// Exits when `audio_stop` fires; on exit the captured `audio_tx` is
+    /// dropped, which closes the engine's input channel.
+    pub(crate) audio_pump: JoinHandle<()>,
+    /// Drains the engine's partial stream and emits Tauri events.
+    pub(crate) engine_pump: JoinHandle<()>,
+    /// Signals the audio pump to drain residual samples and exit. Distinct
+    /// from `cancel` because end-of-dictation is a *clean* stream-close, not
+    /// an abort.
+    pub(crate) audio_stop: CancellationToken,
+    /// Fired only on cancel-on-restart (Phase 9). Aborts in-flight inference.
+    pub(crate) cancel: CancellationToken,
 }
 
 impl DictationSession {
-    pub fn new(capture: CaptureSession, level_pump: JoinHandle<()>) -> Self {
+    pub fn new(
+        capture: CaptureSession,
+        level_pump: JoinHandle<()>,
+        audio_pump: JoinHandle<()>,
+        engine_pump: JoinHandle<()>,
+        audio_stop: CancellationToken,
+        cancel: CancellationToken,
+    ) -> Self {
         Self {
             capture,
             level_pump,
+            audio_pump,
+            engine_pump,
+            audio_stop,
+            cancel,
         }
-    }
-
-    /// Move the inner pieces out for clean shutdown.
-    pub fn into_parts(self) -> Self {
-        self
     }
 }
 
