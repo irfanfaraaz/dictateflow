@@ -28,6 +28,7 @@ use tracing::{debug, info, warn};
 use crate::app::{AppState, DictationSession};
 use crate::audio::capture;
 use crate::engine::{local::LocalEngine, AudioChunk, Engine, EngineError};
+use crate::inject;
 use crate::models;
 use crate::window;
 
@@ -84,10 +85,11 @@ const LEVEL_EVENT_HZ: u64 = 30;
 
 /// Pill fade-out delay after stop. Matches the design spec's ~250 ms cross-
 /// fade so the window is gone exactly when the user perceives the pill to
-/// have "let go." Phase 2 lengthens this to also overlap the temporary
-/// transcript-flash inside the pill (1.5 s in `Pill.tsx`); Phase 3 reverts
-/// the longer delay along with the debug display.
-const PILL_HIDE_DELAY: Duration = Duration::from_millis(1700);
+/// have "let go." Phase 3 trimmed this back from the Phase 2 debug value
+/// (1.7 s) now that the pill no longer flashes the transcript text — the
+/// 250 ms also overlaps the "pasting…" beat the pill renders on
+/// `dictation:injected`.
+const PILL_HIDE_DELAY: Duration = Duration::from_millis(250);
 
 /// Cadence at which the audio drain task copies samples out of the cpal
 /// ringbuf into the engine's mpsc. 100 ms is a comfortable mid-point — far
@@ -189,10 +191,56 @@ pub async fn start_dictation<R: Runtime>(app: &AppHandle<R>) -> Result<Dictation
                 Ok(p) => {
                     debug!(text = %p.text, is_final = p.is_final, "engine partial");
                     if p.is_final {
-                        if let Err(e) =
-                            app_for_engine.emit(EV_DICTATION_FINAL, FinalPayload { text: p.text })
-                        {
+                        // `dictation:final` still fires for downstream
+                        // consumers (Phase 9 may surface it as a tray
+                        // history). The pill no longer subscribes — see
+                        // shape brief §3.
+                        if let Err(e) = app_for_engine.emit(
+                            EV_DICTATION_FINAL,
+                            FinalPayload {
+                                text: p.text.clone(),
+                            },
+                        ) {
                             warn!(?e, "emit dictation:final failed");
+                        }
+
+                        let trimmed = p.text.trim();
+                        if trimmed.is_empty() {
+                            // Whisper sometimes returns "" or
+                            // "[BLANK_AUDIO]" on silence. Skip injection
+                            // and let the pill fade quietly.
+                            info!("skipping injection: empty transcript");
+                        } else {
+                            match inject::paste(&p.text).await {
+                                Ok(()) => {
+                                    if let Err(e) = app_for_engine.emit(
+                                        EV_DICTATION_INJECTED,
+                                        InjectedPayload {
+                                            text: p.text,
+                                            restored_clipboard: true,
+                                        },
+                                    ) {
+                                        warn!(?e, "emit dictation:injected failed");
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(?e, "inject::paste failed");
+                                    let payload = ErrorPayload {
+                                        code: "inject_failed",
+                                        message: e.to_string(),
+                                        recovery_hint: Some(
+                                            "Grant Accessibility permission in System \
+                                             Settings → Privacy & Security → Accessibility."
+                                                .into(),
+                                        ),
+                                    };
+                                    if let Err(e2) =
+                                        app_for_engine.emit(EV_DICTATION_ERROR, payload)
+                                    {
+                                        warn!(?e2, "emit dictation:error failed");
+                                    }
+                                }
+                            }
                         }
                     }
                     // Phase 6 will wire intermediate (is_final=false)
@@ -287,22 +335,12 @@ pub async fn stop_dictation<R: Runtime>(app: &AppHandle<R>, session: DictationSe
     // 5. Drop the unused cancellation token; nothing else holds it.
     drop(cancel);
 
-    // Phase 2 has no real injection. Emit a placeholder `dictation:injected`
-    // so the frontend can run its fade-out path; Phase 3 will emit this
-    // only after real clipboard injection succeeds.
-    if let Err(e) = app.emit(
-        EV_DICTATION_INJECTED,
-        InjectedPayload {
-            text: String::new(),
-            restored_clipboard: false,
-        },
-    ) {
-        warn!(?e, "emit dictation:injected failed");
-    }
+    // `dictation:injected` is emitted by the engine pump once the paste
+    // actually lands; we don't fire a placeholder here. If the engine
+    // pump exited without injecting (silence transcript, error, timeout),
+    // the pill simply falls through its idle state and fades.
 
-    // Wait briefly so the frontend can read the transcript flash before the
-    // window disappears. Phase 3 shortens this back to ~250 ms once the
-    // pill stops rendering text.
+    // Brief overlap with the pill's "pasting…" beat before fade-out.
     tokio::time::sleep(PILL_HIDE_DELAY).await;
     hide_pill_async(app);
 }

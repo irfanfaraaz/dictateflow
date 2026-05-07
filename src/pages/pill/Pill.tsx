@@ -5,7 +5,6 @@ import { useReducedMotion } from "@/hooks/useReducedMotion";
 import {
   audioLevelSchema,
   dictationStartSchema,
-  finalSchema,
   injectedSchema,
   EVENT,
 } from "@/schemas/events";
@@ -14,10 +13,6 @@ import { Waveform } from "@/pages/pill/Waveform";
 // 60 s placeholder cap; Phase 8 makes this engine-aware.
 const DURATION_CAP_SECONDS = 60;
 const FADE_MS = 120;
-// PHASE 2 DEBUG ONLY — how long to flash the raw transcript inside the pill
-// after `dictation:final` arrives. Removed in Phase 3 along with the
-// subscription itself; the steady-state pill never shows transcript text.
-const FINAL_DISPLAY_MS = 1500;
 
 function formatDuration(totalSeconds: number): string {
   const mm = Math.floor(totalSeconds / 60)
@@ -28,38 +23,38 @@ function formatDuration(totalSeconds: number): string {
 }
 
 /**
- * The pill overlay. Mounts on `dictation:start`, unmounts ~250 ms after
- * `dictation:injected`. Renders the waveform + duration counter only;
- * never renders transcript text (locked in shape brief §3).
+ * The pill overlay. Mounts on `dictation:start`. While dictating, shows
+ * a live waveform + duration counter. On `dictation:injected`, swaps the
+ * counter for a "pasting…" beat while it fades out (~250 ms total).
+ *
+ * Per shape brief §3, the pill NEVER renders transcript text. The
+ * `dictation:final` event still fires from Rust for downstream consumers,
+ * but the pill does not subscribe to it.
  */
 export function Pill() {
   const reducedMotion = useReducedMotion();
   const [active, setActive] = useState<boolean>(false);
   const [level, setLevel] = useState<number>(0);
   const [seconds, setSeconds] = useState<number>(0);
-  // PHASE 2 DEBUG ONLY — see top-of-file comment.
-  const [finalText, setFinalText] = useState<string | null>(null);
+  const [pasting, setPasting] = useState<boolean>(false);
 
   // Stable callbacks so useEvent doesn't re-subscribe on every render.
   const onStart = useCallback(() => {
     setActive(true);
     setSeconds(0);
     setLevel(0);
-    setFinalText(null);
+    setPasting(false);
   }, []);
   const onLevel = useCallback((p: { rms: number }) => {
     setLevel(p.rms);
   }, []);
+  // On `dictation:injected`, swap the counter for a brief "pasting…"
+  // beat. We do NOT clear `active` here — Rust hides the pill window
+  // ~250 ms later (PILL_HIDE_DELAY in events.rs), which is what visually
+  // ends the pill. Keeping `active=true` ensures the swap renders.
   const onInjected = useCallback(() => {
-    setActive(false);
+    setPasting(true);
     setLevel(0);
-  }, []);
-  // PHASE 2 DEBUG ONLY — show the transcript in the pill for FINAL_DISPLAY_MS
-  // before the `dictation:injected` event hides the pill. Phase 3 removes
-  // this entirely (text goes to the OS clipboard + pasted into the focused
-  // app instead).
-  const onFinal = useCallback((p: { text: string }) => {
-    setFinalText(p.text);
   }, []);
 
   // Refs let useEvent's stable subscriber call into the latest setter
@@ -67,7 +62,6 @@ export function Pill() {
   const onStartRef = useRef(onStart);
   const onLevelRef = useRef(onLevel);
   const onInjectedRef = useRef(onInjected);
-  const onFinalRef = useRef(onFinal);
   useEffect(() => {
     onStartRef.current = onStart;
   }, [onStart]);
@@ -77,22 +71,10 @@ export function Pill() {
   useEffect(() => {
     onInjectedRef.current = onInjected;
   }, [onInjected]);
-  useEffect(() => {
-    onFinalRef.current = onFinal;
-  }, [onFinal]);
 
   useEvent(EVENT.start, dictationStartSchema, () => onStartRef.current());
   useEvent(EVENT.audioLevel, audioLevelSchema, (p) => onLevelRef.current(p));
   useEvent(EVENT.injected, injectedSchema, () => onInjectedRef.current());
-  useEvent(EVENT.final, finalSchema, (p) => onFinalRef.current(p));
-
-  // PHASE 2 DEBUG ONLY — auto-clear the flashed transcript so a quick
-  // second dictation doesn't show stale text.
-  useEffect(() => {
-    if (finalText === null) return;
-    const id = window.setTimeout(() => setFinalText(null), FINAL_DISPLAY_MS);
-    return () => window.clearTimeout(id);
-  }, [finalText]);
 
   // Duration counter: tick once per second while active.
   useEffect(() => {
@@ -117,23 +99,18 @@ export function Pill() {
           aria-live="polite"
           aria-label="dictation in progress"
         >
-          {finalText !== null ? (
-            // PHASE 2 DEBUG ONLY — replaced by clipboard injection in Phase 3.
-            <span className="truncate text-text" title={finalText}>
-              {finalText.length > 0 ? finalText : "(no speech detected)"}
-            </span>
+          <div className="flex h-7 w-[72px] items-center">
+            <Waveform level={level} reducedMotion={reducedMotion} />
+          </div>
+          <span aria-hidden="true" className="opacity-50">
+            ·
+          </span>
+          {pasting ? (
+            <span className="tabular-nums">pasting…</span>
           ) : (
-            <>
-              <div className="flex h-7 w-[72px] items-center">
-                <Waveform level={level} reducedMotion={reducedMotion} />
-              </div>
-              <span aria-hidden="true" className="opacity-50">
-                ·
-              </span>
-              <span className="tabular-nums">
-                {formatDuration(Math.min(seconds, 99 * 60 + 59))} / {DURATION_CAP_SECONDS}
-              </span>
-            </>
+            <span className="tabular-nums">
+              {formatDuration(Math.min(seconds, 99 * 60 + 59))} / {DURATION_CAP_SECONDS}
+            </span>
           )}
         </motion.div>
       )}
