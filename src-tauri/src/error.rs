@@ -7,11 +7,12 @@
 use serde::Serialize;
 use thiserror::Error;
 
-#[allow(dead_code)] // wired up in later phases
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("{0}")]
     Other(#[from] anyhow::Error),
+    #[error("settings: {0}")]
+    Settings(#[from] crate::settings::SettingsError),
 }
 
 impl Serialize for AppError {
@@ -20,5 +21,4 @@ impl Serialize for AppError {
     }
 }
 
-#[allow(dead_code)] // wired up in later phases
 pub type AppResult<T> = std::result::Result<T, AppError>;

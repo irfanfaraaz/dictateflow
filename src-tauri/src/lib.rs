@@ -5,6 +5,7 @@
 
 mod app;
 mod audio;
+mod commands;
 mod engine;
 mod error;
 mod events;
@@ -12,6 +13,7 @@ mod hotkey;
 mod inject;
 mod models;
 mod permissions;
+mod settings;
 mod window;
 
 /// Test-only re-exports.
@@ -28,7 +30,7 @@ pub mod __test_only {
 
 use app::{AppState, DictationController};
 use tauri::Manager;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -46,7 +48,29 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(AppState::new())
         .manage(DictationController::new())
+        .invoke_handler(tauri::generate_handler![
+            commands::get_settings,
+            commands::update_settings,
+            commands::get_permissions,
+            commands::open_system_settings,
+            commands::open_path,
+            commands::resolve_log_path,
+        ])
         .setup(|app| {
+            // Settings store load happens in setup so the AppHandle is
+            // available. Failure here is fatal — without persistence the
+            // settings UI would silently drop user changes, which is worse
+            // than refusing to launch.
+            match settings::SettingsStore::load(app.handle()) {
+                Ok(store) => {
+                    app.manage(store);
+                }
+                Err(e) => {
+                    error!(?e, "failed to load settings store");
+                    return Err(Box::new(e));
+                }
+            }
+
             let settings = app
                 .get_webview_window("settings")
                 .expect("settings window must exist");

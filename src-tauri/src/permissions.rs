@@ -12,10 +12,10 @@
 
 #![allow(dead_code)] // surface API; real impl in Phase 4
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Tri-state mirror of macOS's TCC authorization status.
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionState {
     Granted,
@@ -24,7 +24,7 @@ pub enum PermissionState {
 }
 
 /// Three permissions wispertype needs, each with its own System Settings pane.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionKind {
     /// Microphone — required for `cpal` to deliver audio frames.
