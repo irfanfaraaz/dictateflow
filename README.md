@@ -4,31 +4,36 @@ Voice dictation for macOS — speak into any app, get text. Built with Rust + Ta
 
 Press a hotkey, talk, release. Your speech is transcribed via ElevenLabs Scribe v2 and pasted into whatever app has focus. A minimal floating waveform bubble shows at the bottom of your screen while recording.
 
-## Requirements
+## Download
+
+Grab the latest `.dmg` from [**Releases**](https://github.com/irfanfaraaz/dictateflow/releases).
+
+> **macOS Gatekeeper warning** — DictateFlow is not yet code-signed or notarized, so macOS will block it on first launch. To open it:
+>
+> 1. Open the `.dmg` and drag DictateFlow to Applications
+> 2. Try to open DictateFlow — macOS will show "Apple cannot check it for malicious software"
+> 3. Go to **System Settings → Privacy & Security** → scroll down to find the "DictateFlow was blocked" message → click **Open Anyway**
+> 4. Or: right-click the app → **Open** → click **Open** in the dialog
+>
+> You only need to do this once. After that it opens normally.
+
+### Requirements
 
 - **macOS** on Apple Silicon (M1+)
-- **Rust** toolchain (`rustup` — stable channel)
-- **Node.js** 18+ and **pnpm**
 - **ElevenLabs API key** ([elevenlabs.io](https://elevenlabs.io) — Scribe v2 access)
 
-## Install
+### Build from source
+
+Requires Rust toolchain (`rustup`), Node.js 18+, and pnpm.
 
 ```bash
-# Clone
 git clone https://github.com/irfanfaraaz/dictateflow.git
 cd dictateflow
-
-# Install frontend dependencies
 pnpm install
-
-# Run in dev mode
-pnpm tauri dev
-
-# Or build a production .app
 pnpm tauri build
 ```
 
-The built app lands in `src-tauri/target/release/bundle/macos/DictateFlow.app`.
+The `.app` lands in `src-tauri/target/release/bundle/macos/DictateFlow.app` and the `.dmg` in `src-tauri/target/release/bundle/dmg/`.
 
 ## Setup
 
