@@ -5,10 +5,10 @@ const BAR_WIDTH = 2;
 const BAR_GAP = 4;
 const MIN_BAR_HEIGHT = 3;
 const MAX_BAR_HEIGHT = 28;
-// Per shape brief: Tailwind `accent` token = oklch(0.62 0.20 25).
-const BAR_COLOR = "oklch(0.62 0.20 25)";
-// 80% cap warning: brighter, more saturated red.
-const BAR_COLOR_WARN = "oklch(0.72 0.28 25)";
+// Read from CSS custom properties defined in tokens.css so there is a single
+// source of truth for these values (tailwind.config.ts + tokens.css).
+const BAR_COLOR = "var(--accent)";
+const BAR_COLOR_WARN = "var(--accent-warn)";
 // Per-frame easing factor for the bar-height interpolation. Lower = smoother
 // (more visual lag), higher = snappier. 0.25 lands close to a 60 Hz spring
 // without the cost of a real solver.

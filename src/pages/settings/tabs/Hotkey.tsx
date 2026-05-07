@@ -128,7 +128,7 @@ export function Hotkey(): JSX.Element {
         </div>
 
         {bindError !== null && (
-          <p className="mt-3 font-mono text-xs text-red-400" role="alert">
+          <p className="mt-3 font-mono text-xs text-accent-warn" role="alert">
             {bindError}
           </p>
         )}

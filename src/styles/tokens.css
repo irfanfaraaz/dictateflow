@@ -1,0 +1,17 @@
+/**
+ * CSS custom properties mirroring the Tailwind design tokens.
+ *
+ * Purpose: canvas drawing code (Waveform.tsx) and any other non-Tailwind
+ * surface reads from these vars instead of hardcoding color strings.
+ * All values must stay in sync with tailwind.config.ts.
+ */
+:root {
+  --ink: oklch(0.18 0.01 60);
+  --paper: oklch(0.92 0.005 60);
+  --rule: oklch(0.32 0.01 60);
+  --muted: oklch(0.55 0.005 60);
+  --text: oklch(0.92 0.005 60);
+  --accent: oklch(0.62 0.20 25);
+  /* Urgency variant: brighter at ≥80% dictation cap. */
+  --accent-warn: oklch(0.68 0.22 25);
+}

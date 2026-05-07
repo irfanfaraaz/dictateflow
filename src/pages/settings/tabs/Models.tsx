@@ -42,7 +42,7 @@ export function Models(): JSX.Element {
                   onClick={() => startDownload(model.id)}
                   className="font-mono text-sm uppercase tracking-wide text-accent underline underline-offset-4"
                 >
-                  RETRY
+                  retry
                 </button>
               </dd>
             );
@@ -76,7 +76,7 @@ export function Models(): JSX.Element {
                     onClick={() => cancelDownload(model.id)}
                     className="font-mono text-xs uppercase tracking-wide text-accent underline underline-offset-4"
                   >
-                    CANCEL
+                    cancel
                   </button>
                 </div>
               </dd>
@@ -87,9 +87,9 @@ export function Models(): JSX.Element {
             return (
               <dd className="col-span-2 pt-3 flex items-center gap-4">
                 <span className="font-mono text-sm text-muted uppercase tracking-wide">
-                  INSTALLED
+                  installed
                 </span>
-                <InlineConfirm label="DELETE" onConfirm={() => deleteModel(model.id)} />
+                <InlineConfirm label="delete" onConfirm={() => deleteModel(model.id)} />
               </dd>
             );
           }
@@ -102,7 +102,7 @@ export function Models(): JSX.Element {
                 onClick={() => startDownload(model.id)}
                 className="font-mono text-sm uppercase tracking-wide text-accent underline underline-offset-4"
               >
-                INSTALL
+                install
               </button>
             </dd>
           );

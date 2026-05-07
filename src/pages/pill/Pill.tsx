@@ -186,7 +186,7 @@ export function Pill() {
                 <span
                   className={[
                     "tabular-nums",
-                    nearCap ? "font-bold text-red-400" : "",
+                    nearCap ? "font-bold text-accent-warn" : "",
                   ]
                     .filter(Boolean)
                     .join(" ")}
@@ -204,7 +204,8 @@ export function Pill() {
               role="alert"
               aria-atomic="true"
             >
-              <span className="w-full truncate text-[12px] text-red-400">
+              {/* TODO(impeccable-craft): consider a distinct --error token if error vs. warn semantics diverge in craft pass */}
+              <span className="w-full truncate text-[12px] text-accent-warn">
                 {errorMsg}
               </span>
             </div>

@@ -91,7 +91,7 @@ export function About(): JSX.Element {
       {/* Sounds sub-section */}
       <DossierCard header="sounds">
         <p className="mb-4 text-xs text-muted">
-          Optional audible feedback using macOS system sounds. Off by default.
+          optional audible feedback using macOS system sounds. off by default.
         </p>
         <div className="space-y-3">
           <label className="flex items-center gap-3 cursor-pointer">
