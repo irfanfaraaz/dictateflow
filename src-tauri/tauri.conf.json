@@ -1,0 +1,53 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "wispertype",
+  "version": "0.1.0",
+  "identifier": "com.wispertype.app",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "settings",
+        "title": "wispertype",
+        "url": "index.html",
+        "width": 720,
+        "height": 640,
+        "minWidth": 640,
+        "minHeight": 520,
+        "resizable": true,
+        "visible": false,
+        "decorations": true,
+        "transparent": false,
+        "backgroundColor": "#0d0c0a"
+      },
+      {
+        "label": "pill",
+        "title": "wispertype-pill",
+        "url": "pill.html",
+        "width": 320,
+        "height": 80,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "visible": false,
+        "shadow": false
+      }
+    ],
+    "security": { "csp": null },
+    "trayIcon": { "iconPath": "icons/icon.png", "iconAsTemplate": true }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "app",
+    "icon": ["icons/icon.png"]
+  }
+}
