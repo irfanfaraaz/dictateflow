@@ -90,14 +90,14 @@ impl HotkeyManager {
                     (HotkeyMode::Hold, ShortcutState::Pressed) => {
                         let app = app_for_handler.clone();
                         let ctrl = controller.clone();
-                        tokio::spawn(async move {
+                        tauri::async_runtime::spawn(async move {
                             ctrl.start(app).await;
                         });
                     }
                     (HotkeyMode::Hold, ShortcutState::Released) => {
                         let app = app_for_handler.clone();
                         let ctrl = controller.clone();
-                        tokio::spawn(async move {
+                        tauri::async_runtime::spawn(async move {
                             ctrl.stop(app).await;
                         });
                     }
@@ -107,7 +107,7 @@ impl HotkeyManager {
                     (HotkeyMode::Toggle, ShortcutState::Pressed) => {
                         let app = app_for_handler.clone();
                         let ctrl = controller.clone();
-                        tokio::spawn(async move {
+                        tauri::async_runtime::spawn(async move {
                             ctrl.toggle(app).await;
                         });
                     }

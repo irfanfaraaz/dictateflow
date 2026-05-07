@@ -104,7 +104,7 @@ pub fn set_state<R: Runtime>(app: &AppHandle<R>, state: TrayState) -> tauri::Res
     if state == TrayState::Error {
         let gen = ERROR_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
         let app2 = app.clone();
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             // If generation has advanced, a newer transition happened — skip.
             if ERROR_GENERATION.load(Ordering::SeqCst) != gen {
