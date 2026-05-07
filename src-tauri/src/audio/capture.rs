@@ -43,7 +43,7 @@ use ringbuf::{
     HeapCons, HeapProd, HeapRb,
 };
 use tokio::sync::watch;
-use tracing::{debug, warn};
+use tracing::{info, warn};
 
 use super::{AudioError, TARGET_SAMPLE_RATE};
 
@@ -103,6 +103,7 @@ pub fn start() -> Result<(CaptureSession, HeapCons<f32>, watch::Receiver<f32>), 
         .default_input_config()
         .map_err(|e| AudioError::UnsupportedConfig(e.to_string()))?;
 
+    let device_name = device.name().unwrap_or_else(|_| "<unknown>".into());
     let device_sample_rate = supported.sample_rate().0;
     let channels = supported.channels() as usize;
     let sample_format = supported.sample_format();
@@ -113,7 +114,8 @@ pub fn start() -> Result<(CaptureSession, HeapCons<f32>, watch::Receiver<f32>), 
     let decim = (device_sample_rate as f32 / TARGET_SAMPLE_RATE as f32).round() as usize;
     let decim = decim.max(1);
 
-    debug!(
+    info!(
+        device = %device_name,
         device_rate = device_sample_rate,
         channels,
         format = ?sample_format,
@@ -128,6 +130,12 @@ pub fn start() -> Result<(CaptureSession, HeapCons<f32>, watch::Receiver<f32>), 
     let stopped = Arc::new(AtomicBool::new(false));
     let stopped_cb = stopped.clone();
 
+    // One-shot "first samples received" signal. Set in the callback the
+    // first time we observe any input. A sibling tokio task at the call
+    // site can poll this for a few seconds and warn if it never flips.
+    let saw_samples = Arc::new(AtomicBool::new(false));
+    let saw_samples_cb = saw_samples.clone();
+
     let stream = build_stream(
         &device,
         &config,
@@ -137,7 +145,24 @@ pub fn start() -> Result<(CaptureSession, HeapCons<f32>, watch::Receiver<f32>), 
         producer,
         level_tx,
         stopped_cb,
+        saw_samples_cb,
     )?;
+
+    // Health check: if cpal hasn't fired the callback within 1 s, the
+    // device is silent — very common with permission grant on the wrong
+    // bundle, with virtual audio drivers, or with a muted/disconnected
+    // input. Log loud so the user can see it in `tail -f`.
+    let saw_for_check = saw_samples.clone();
+    let device_for_check = device_name.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        if !saw_for_check.load(Ordering::Acquire) {
+            warn!(
+                device = %device_for_check,
+                "audio capture: NO samples received after 1s — mic permission denied, device muted, or cpal opened a silent virtual device"
+            );
+        }
+    });
 
     stream
         .play()
@@ -161,6 +186,7 @@ fn build_stream(
     producer: HeapProd<f32>,
     level_tx: watch::Sender<f32>,
     stopped: Arc<AtomicBool>,
+    saw_samples: Arc<AtomicBool>,
 ) -> Result<Stream, AudioError> {
     let err_cb = |err| {
         // Stream errors land on a separate callback; we can't `?` from inside
@@ -172,19 +198,19 @@ fn build_stream(
     let result: Result<Stream, BuildStreamError> = match fmt {
         SampleFormat::F32 => device.build_input_stream(
             config,
-            make_callback::<f32>(channels, decim, producer, level_tx, stopped),
+            make_callback::<f32>(channels, decim, producer, level_tx, stopped, saw_samples),
             err_cb,
             None,
         ),
         SampleFormat::I16 => device.build_input_stream(
             config,
-            make_callback::<i16>(channels, decim, producer, level_tx, stopped),
+            make_callback::<i16>(channels, decim, producer, level_tx, stopped, saw_samples),
             err_cb,
             None,
         ),
         SampleFormat::U16 => device.build_input_stream(
             config,
-            make_callback::<u16>(channels, decim, producer, level_tx, stopped),
+            make_callback::<u16>(channels, decim, producer, level_tx, stopped, saw_samples),
             err_cb,
             None,
         ),
@@ -209,6 +235,7 @@ fn make_callback<S>(
     mut producer: HeapProd<f32>,
     level_tx: watch::Sender<f32>,
     stopped: Arc<AtomicBool>,
+    saw_samples: Arc<AtomicBool>,
 ) -> impl FnMut(&[S], &cpal::InputCallbackInfo) + Send + 'static
 where
     S: Sample + cpal::SizedSample,
@@ -222,6 +249,13 @@ where
     move |input: &[S], _info: &cpal::InputCallbackInfo| {
         if stopped.load(Ordering::Acquire) {
             return;
+        }
+
+        // First-callback signal for the post-start health check. Atomic
+        // store with Release pairs with the health-check task's Acquire.
+        // Cheap on the hot path — modern ARM has dedicated atomic ops.
+        if !input.is_empty() {
+            saw_samples.store(true, Ordering::Release);
         }
 
         // Step 1: deinterleave to mono + decimate to ~16k, into the local
