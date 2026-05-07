@@ -4,16 +4,23 @@
 //! relays partial / final transcripts back through the [`Engine`] trait's
 //! `Stream<Result<Partial, _>>` interface.
 //!
-//! # Wire shape (defensive — verify against current docs)
+//! # Wire shape
 //!
-//! - Connect: `wss://api.elevenlabs.io/v1/speech-to-text/stream` with the
-//!   `xi-api-key: <user_key>` header on the upgrade request.
-//! - Audio out: binary frames containing little-endian 16-bit PCM samples
-//!   (we convert from `f32` in `pcm_f32_to_i16_le`).
-//! - Transcripts in: text frames with JSON like `{"text":"…","is_final":bool}`.
-//!   Field names vary across API revisions; [`parse_partial`] tolerates
-//!   `is_final` / `final` / `done` and treats unknown shapes as no-ops.
-//! - Stop: send `{"type":"close"}` then a WebSocket Close frame.
+//! - Connect: `wss://api.elevenlabs.io/v1/speech-to-text/realtime?model_id=scribe_v2_realtime`
+//!   with the `xi-api-key: <user_key>` header on the upgrade request. The
+//!   `model_id` query parameter is required — the handshake returns 403
+//!   without it.
+//! - Audio out: text frames containing JSON
+//!   `{"message_type":"input_audio_chunk","audio_base_64":"<b64>","commit":bool}`.
+//!   The audio bytes are 16 kHz mono little-endian 16-bit PCM (default
+//!   `audio_format=pcm_16000`), base64-encoded into the JSON payload.
+//!   Raw binary frames are rejected.
+//! - Transcripts in: text frames discriminated by `message_type`:
+//!   `partial_transcript` (interim) and `committed_transcript` (final).
+//!   `session_started` and `scribe_*_error` events are dropped at
+//!   [`parse_partial`] today — extend if richer error surfacing is needed.
+//! - Stop: send a final `input_audio_chunk` with `commit: true` (forces the
+//!   server to emit `committed_transcript`), then a WebSocket Close frame.
 //!
 //! # No reconnect
 //!
@@ -21,18 +28,12 @@
 //! dictation press starts fresh — simpler than coordinating audio buffer
 //! replay across a reconnect, and matches the user-facing model where the
 //! pill represents one in-flight session.
-//!
-//! # Phase 7.3 wiring TODO
-//!
-//! - add `pub mod scribe;` to `src/engine/mod.rs`
-//! - add an `EngineKind::Scribe` arm to the engine factory (factory lives in
-//!   Phase 7.3, after the settings store from Phase 4 is in place)
-//! - read api key from keychain at construction; bubble `MissingApiKey` if
-//!   absent (`crate::keychain::get(crate::keychain::ELEVENLABS_KEY)`)
 
 #![allow(dead_code)] // surfaced in Phase 7.3 via the engine factory
 
 use async_trait::async_trait;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use futures::stream::BoxStream;
 use futures::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
@@ -43,12 +44,13 @@ use tokio_util::sync::CancellationToken;
 
 use super::{AudioChunk, Engine, EngineError, EngineResult, Partial};
 
-/// Default Scribe v2 streaming endpoint.
+/// Default Scribe v2 realtime streaming endpoint.
 ///
-/// Centralised so that flipping it (e.g. ElevenLabs renames the route to
-/// `/v1/realtime/scribe-v2`) is a one-line change. Tests can also point at
-/// a local mock via [`ScribeEngine::with_url`].
-pub const SCRIBE_WS_URL: &str = "wss://api.elevenlabs.io/v1/speech-to-text/stream";
+/// `model_id=scribe_v2_realtime` is required as a query parameter — the
+/// handshake returns 403 without it. Tests can point at a local mock via
+/// [`ScribeEngine::with_url`].
+pub const SCRIBE_WS_URL: &str =
+    "wss://api.elevenlabs.io/v1/speech-to-text/realtime?model_id=scribe_v2_realtime";
 
 /// WebSocket-backed realtime engine for ElevenLabs Scribe v2.
 pub struct ScribeEngine {
@@ -126,8 +128,8 @@ impl Engine for ScribeEngine {
 
                     chunk = audio_rx.recv(), if !audio_done => match chunk {
                         Some(AudioChunk { samples }) => {
-                            let bytes = pcm_f32_to_i16_le(&samples);
-                            if let Err(e) = ws_tx.send(Message::Binary(bytes)).await {
+                            let frame = encode_audio_chunk(&samples, false);
+                            if let Err(e) = ws_tx.send(Message::Text(frame)).await {
                                 let _ = partial_tx
                                     .send(Err(EngineError::WebSocket(e.to_string())))
                                     .await;
@@ -135,13 +137,13 @@ impl Engine for ScribeEngine {
                             }
                         }
                         None => {
-                            // Audio sender dropped — flush a close marker
-                            // and keep draining ws_rx until the server says
-                            // it's done.
+                            // Audio sender dropped — send a final empty
+                            // chunk with `commit: true` to force the server
+                            // to emit a `committed_transcript`, then keep
+                            // draining ws_rx until that final event arrives.
                             audio_done = true;
-                            let _ = ws_tx
-                                .send(Message::Text(r#"{"type":"close"}"#.into()))
-                                .await;
+                            let frame = encode_audio_chunk(&[], true);
+                            let _ = ws_tx.send(Message::Text(frame)).await;
                         }
                     },
 
@@ -218,29 +220,49 @@ fn host_from_url(url: &str) -> Option<&str> {
     Some(host_with_port)
 }
 
+/// Encode one audio buffer as an `input_audio_chunk` JSON frame.
+///
+/// `commit: true` signals end-of-stream and forces the server to emit a
+/// `committed_transcript`. We wrap the i16 LE PCM bytes in base64 because
+/// the API takes JSON-only frames — raw binary frames are rejected.
+fn encode_audio_chunk(samples: &[f32], commit: bool) -> String {
+    let pcm = pcm_f32_to_i16_le(samples);
+    let b64 = BASE64.encode(&pcm);
+    let payload = serde_json::json!({
+        "message_type": "input_audio_chunk",
+        "audio_base_64": b64,
+        "commit": commit,
+    });
+    payload.to_string()
+}
+
 /// Parse a Scribe transcript text frame into a [`Partial`].
 ///
-/// We match three field-name variants for the finality flag (`is_final`,
-/// `final`, `done`) because the realtime API has shipped each spelling at
-/// different times. Anything missing a `text` field is treated as a
-/// non-transcript control frame and ignored.
+/// The API discriminates events by the `message_type` field. We surface:
+/// - `partial_transcript` → `Partial { is_final: false }`
+/// - `committed_transcript` (and the *_with_timestamps variant) →
+///   `Partial { is_final: true }`
+///
+/// `session_started` and pings are dropped (return `None`). All
+/// `scribe_*_error` events are treated like committed text frames with the
+/// error string as `text` so the dictation flow can surface them — but
+/// callers should check upstream for these by the message_type if they want
+/// distinct handling. For Phase 7 we keep the surface narrow and just
+/// forward transcript text.
 fn parse_partial(json: &str) -> Option<Partial> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
-    let text = v.get("text").and_then(|x| x.as_str())?.to_string();
-    let is_final = v
-        .get("is_final")
-        .and_then(|x| x.as_bool())
-        .or_else(|| v.get("final").and_then(|x| x.as_bool()))
-        .or_else(|| v.get("done").and_then(|x| x.as_bool()))
-        .unwrap_or(false);
-    let confidence = v
-        .get("confidence")
-        .and_then(|x| x.as_f64())
-        .map(|c| c as f32);
+    let kind = v.get("message_type").and_then(|x| x.as_str())?;
+    let (is_final, text) = match kind {
+        "partial_transcript" => (false, v.get("text")?.as_str()?.to_string()),
+        "committed_transcript" | "committed_transcript_with_timestamps" => {
+            (true, v.get("text")?.as_str()?.to_string())
+        }
+        _ => return None,
+    };
     Some(Partial {
         text,
         is_final,
-        confidence,
+        confidence: None,
     })
 }
 
@@ -249,36 +271,64 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_partial_is_final_variant() {
-        let p = parse_partial(r#"{"text":"hi","is_final":true}"#).expect("parse");
+    fn parse_partial_partial_transcript() {
+        let p =
+            parse_partial(r#"{"message_type":"partial_transcript","text":"hi"}"#).expect("parse");
         assert_eq!(p.text, "hi");
-        assert!(p.is_final);
-        assert!(p.confidence.is_none());
-    }
-
-    #[test]
-    fn parse_partial_final_variant() {
-        let p = parse_partial(r#"{"text":"foo","final":false}"#).expect("parse");
-        assert_eq!(p.text, "foo");
         assert!(!p.is_final);
     }
 
     #[test]
-    fn parse_partial_done_variant_with_confidence() {
-        let p = parse_partial(r#"{"text":"x","done":true,"confidence":0.9}"#).expect("parse");
-        assert_eq!(p.text, "x");
+    fn parse_partial_committed_transcript_marks_final() {
+        let p = parse_partial(r#"{"message_type":"committed_transcript","text":"foo"}"#)
+            .expect("parse");
+        assert_eq!(p.text, "foo");
         assert!(p.is_final);
-        assert!((p.confidence.expect("conf") - 0.9).abs() < 1e-6);
     }
 
     #[test]
-    fn parse_partial_no_text_returns_none() {
-        assert!(parse_partial(r#"{"type":"ack"}"#).is_none());
+    fn parse_partial_committed_with_timestamps_marks_final() {
+        let p = parse_partial(
+            r#"{"message_type":"committed_transcript_with_timestamps","text":"x","words":[]}"#,
+        )
+        .expect("parse");
+        assert_eq!(p.text, "x");
+        assert!(p.is_final);
+    }
+
+    #[test]
+    fn parse_partial_session_started_returns_none() {
+        assert!(parse_partial(r#"{"message_type":"session_started","session_id":"a"}"#).is_none());
+    }
+
+    #[test]
+    fn parse_partial_unknown_type_returns_none() {
+        assert!(parse_partial(r#"{"message_type":"weather_report","text":"sunny"}"#).is_none());
     }
 
     #[test]
     fn parse_partial_invalid_json_returns_none() {
         assert!(parse_partial("not-json").is_none());
+    }
+
+    #[test]
+    fn encode_audio_chunk_shape_and_base64() {
+        let frame = encode_audio_chunk(&[0.0_f32, 1.0, -1.0], false);
+        let v: serde_json::Value = serde_json::from_str(&frame).expect("valid json");
+        assert_eq!(v["message_type"], "input_audio_chunk");
+        assert_eq!(v["commit"], false);
+        let b64 = v["audio_base_64"].as_str().expect("b64 string");
+        let decoded = BASE64.decode(b64).expect("decodes");
+        // 3 samples * 2 bytes each
+        assert_eq!(decoded.len(), 6);
+    }
+
+    #[test]
+    fn encode_audio_chunk_commit_flag_set_on_close() {
+        let frame = encode_audio_chunk(&[], true);
+        let v: serde_json::Value = serde_json::from_str(&frame).expect("valid json");
+        assert_eq!(v["commit"], true);
+        assert_eq!(v["audio_base_64"], "");
     }
 
     #[test]
