@@ -5,6 +5,7 @@ import { getPermissions, openPath, resolveLogPath, openLogDir } from "@/ipc/comm
 import type { PermissionsSnapshot } from "@/schemas/settings";
 
 const APP_VERSION = "0.1.0";
+const RELEASES_URL = "https://github.com/irfanfaraaz/dictateflow/releases";
 
 export function About(): JSX.Element {
   const { settings, update } = useSettingsContext();
@@ -59,6 +60,18 @@ export function About(): JSX.Element {
         <div className="mt-6 flex flex-wrap gap-x-6 gap-y-2">
           <button
             type="button"
+            onClick={() => {
+              void openPath(RELEASES_URL).catch((err) => {
+                // eslint-disable-next-line no-console
+                console.error("[about] open releases failed", err);
+              });
+            }}
+            className="font-mono text-sm uppercase tracking-wide text-accent underline underline-offset-4"
+          >
+            check for updates →
+          </button>
+          <button
+            type="button"
             disabled={!logPath}
             onClick={() => {
               void openLogDir().catch((err) => {
@@ -66,11 +79,10 @@ export function About(): JSX.Element {
                 console.error("[about] open log dir failed", err);
               });
             }}
-            className="font-mono text-sm uppercase tracking-wide text-accent underline underline-offset-4 disabled:text-muted disabled:no-underline"
+            className="font-mono text-sm uppercase tracking-wide text-muted underline underline-offset-4 disabled:no-underline"
           >
             open log folder →
           </button>
-          {/* Keep the old "open log file" link for direct access */}
           <button
             type="button"
             disabled={!logPath}
