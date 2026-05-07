@@ -56,6 +56,9 @@ pub fn run() {
             commands::open_system_settings,
             commands::open_path,
             commands::resolve_log_path,
+            commands::set_api_key,
+            commands::clear_api_key,
+            commands::test_engine,
         ])
         .setup(|app| {
             // Settings store load happens in setup so the AppHandle is
