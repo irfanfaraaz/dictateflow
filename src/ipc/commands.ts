@@ -54,6 +54,11 @@ export async function resolveLogPath(): Promise<string> {
   return raw;
 }
 
+/** Open the log directory (~Library/Logs/wispertype/) in Finder. */
+export async function openLogDir(): Promise<void> {
+  await invoke("open_log_dir");
+}
+
 /** Save an ElevenLabs API key to the macOS Keychain. */
 export async function setApiKey(key: string): Promise<void> {
   await invoke("set_api_key", { key });

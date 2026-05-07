@@ -1,13 +1,13 @@
 import { useEffect, useState } from "react";
 import { DefinitionList, DossierCard } from "../components";
 import { useSettingsContext } from "../SettingsContext";
-import { getPermissions, openPath, resolveLogPath } from "@/ipc/commands";
+import { getPermissions, openPath, resolveLogPath, openLogDir } from "@/ipc/commands";
 import type { PermissionsSnapshot } from "@/schemas/settings";
 
 const APP_VERSION = "0.1.0";
 
 export function About(): JSX.Element {
-  const { settings } = useSettingsContext();
+  const { settings, update } = useSettingsContext();
   const [perms, setPerms] = useState<PermissionsSnapshot | null>(null);
   const [logPath, setLogPath] = useState<string>("");
 
@@ -51,7 +51,7 @@ export function About(): JSX.Element {
             { term: "input mon.", value: perms?.input_monitoring ?? "…" },
             {
               term: "logs",
-              value: logPath || "~/Library/Logs/wispertype/wispertype.log",
+              value: "~/Library/Logs/wispertype/ (rotating daily)",
             },
           ]}
         />
@@ -61,19 +61,72 @@ export function About(): JSX.Element {
             type="button"
             disabled={!logPath}
             onClick={() => {
-              if (!logPath) return;
-              void openPath(logPath);
+              void openLogDir().catch((err) => {
+                // eslint-disable-next-line no-console
+                console.error("[about] open log dir failed", err);
+              });
             }}
             className="font-mono text-sm uppercase tracking-wide text-accent underline underline-offset-4 disabled:text-muted disabled:no-underline"
+          >
+            open log folder →
+          </button>
+          {/* Keep the old "open log file" link for direct access */}
+          <button
+            type="button"
+            disabled={!logPath}
+            onClick={() => {
+              if (!logPath) return;
+              void openPath(logPath).catch((err) => {
+                // eslint-disable-next-line no-console
+                console.error("[about] open log file failed", err);
+              });
+            }}
+            className="font-mono text-sm uppercase tracking-wide text-muted underline underline-offset-4 disabled:no-underline"
           >
             open log file →
           </button>
         </div>
+      </DossierCard>
 
-        <p className="mt-4 text-muted text-xs">
-          log file rotation lands in phase 9 — the path exists today even
-          if the file is empty.
+      {/* Sounds sub-section */}
+      <DossierCard header="sounds">
+        <p className="mb-4 text-xs text-muted">
+          Optional audible feedback using macOS system sounds. Off by default.
         </p>
+        <div className="space-y-3">
+          <label className="flex items-center gap-3 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={settings.sounds.start_enabled}
+              onChange={(e) => {
+                void update({ sounds: { start_enabled: e.target.checked } }).catch(
+                  (err) => {
+                    // eslint-disable-next-line no-console
+                    console.error("[about] sounds update failed", err);
+                  },
+                );
+              }}
+              className="h-4 w-4 rounded border-muted accent-accent"
+            />
+            <span className="font-mono text-sm">play sound on start</span>
+          </label>
+          <label className="flex items-center gap-3 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={settings.sounds.stop_enabled}
+              onChange={(e) => {
+                void update({ sounds: { stop_enabled: e.target.checked } }).catch(
+                  (err) => {
+                    // eslint-disable-next-line no-console
+                    console.error("[about] sounds update failed", err);
+                  },
+                );
+              }}
+              className="h-4 w-4 rounded border-muted accent-accent"
+            />
+            <span className="font-mono text-sm">play sound on stop</span>
+          </label>
+        </div>
       </DossierCard>
     </div>
   );

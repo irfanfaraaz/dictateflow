@@ -40,6 +40,12 @@ export const pillSettingsSchema = z.object({
 });
 export type PillSettings = z.infer<typeof pillSettingsSchema>;
 
+export const soundsSettingsSchema = z.object({
+  start_enabled: z.boolean(),
+  stop_enabled: z.boolean(),
+});
+export type SoundsSettings = z.infer<typeof soundsSettingsSchema>;
+
 export const settingsSchema = z.object({
   engine: engineKindSchema,
   local: localSettingsSchema,
@@ -48,6 +54,7 @@ export const settingsSchema = z.object({
   language: z.string(),
   limits: limitsSchema,
   pill: pillSettingsSchema,
+  sounds: soundsSettingsSchema,
   telemetry: z.boolean(),
   first_run_completed: z.boolean(),
 });

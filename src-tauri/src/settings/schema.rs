@@ -105,6 +105,18 @@ impl Default for PillSettings {
     }
 }
 
+/// Optional audible feedback on dictation start/stop.
+///
+/// Uses macOS system sounds (NSSound) so no audio assets are shipped.
+/// Both default to `false` — users opt in from the About tab.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SoundsSettings {
+    /// Play a system sound when dictation begins (start of hold/toggle).
+    pub start_enabled: bool,
+    /// Play a system sound when dictation ends cleanly (text injected).
+    pub stop_enabled: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub engine: EngineKind,
@@ -115,6 +127,7 @@ pub struct Settings {
     pub language: String,
     pub limits: Limits,
     pub pill: PillSettings,
+    pub sounds: SoundsSettings,
     pub telemetry: bool,
     pub first_run_completed: bool,
 }
@@ -129,6 +142,7 @@ impl Default for Settings {
             language: "auto".into(),
             limits: Limits::default(),
             pill: PillSettings::default(),
+            sounds: SoundsSettings::default(),
             telemetry: false,
             first_run_completed: false,
         }
