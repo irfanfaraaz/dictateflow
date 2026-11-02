@@ -11,6 +11,10 @@ export const dictationStartSchema = z.object({
 });
 export type DictationStart = z.infer<typeof dictationStartSchema>;
 
+/** Hotkey released — capture stopped, engine is now transcribing. */
+export const dictationStopSchema = z.object({}).passthrough().nullable().optional();
+export type DictationStop = z.infer<typeof dictationStopSchema>;
+
 export const capReachedSchema = z.object({
   cap_seconds: z.number().int().nonnegative(),
 });
@@ -45,6 +49,7 @@ export type DictationFinal = z.infer<typeof finalSchema>;
 export const EVENT = {
   start: "dictation:start",
   audioLevel: "dictation:audio_level",
+  stop: "dictation:stop",
   injected: "dictation:injected",
   error: "dictation:error",
   final: "dictation:final",

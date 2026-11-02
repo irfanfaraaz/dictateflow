@@ -39,6 +39,9 @@ use crate::window;
 
 pub const EV_DICTATION_START: &str = "dictation:start";
 pub const EV_DICTATION_AUDIO_LEVEL: &str = "dictation:audio_level";
+/// Emitted the moment capture stops (hotkey released / VAD / cap) so the pill
+/// can switch from the live waveform to its "transcribing" animation.
+pub const EV_DICTATION_STOP: &str = "dictation:stop";
 pub const EV_DICTATION_INJECTED: &str = "dictation:injected";
 pub const EV_DICTATION_ERROR: &str = "dictation:error";
 /// PHASE 2 DEBUG ONLY — emitted with the raw transcript so the pill can
@@ -510,6 +513,11 @@ pub async fn stop_dictation<R: Runtime>(app: &AppHandle<R>, session: DictationSe
     level_pump.abort();
     vad_task.abort();
     cap_task.abort();
+
+    // Tell the pill we're now transcribing (no more level events will come).
+    if let Err(e) = app.emit(EV_DICTATION_STOP, ()) {
+        debug!(?e, "emit dictation:stop failed");
+    }
 
     // 3. Give the cpal callback a tick to land its final buffer in the
     //    ringbuf, then signal the audio pump to drain + exit. The pump

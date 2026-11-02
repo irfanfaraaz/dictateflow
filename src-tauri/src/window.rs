@@ -30,12 +30,16 @@ use tracing::warn;
 pub const PILL_LABEL: &str = "pill";
 
 /// Width of the pill window in logical pixels (matches tauri.conf.json).
-pub const PILL_WIDTH: f64 = 80.0;
+/// Larger than the visible pill (~100×38) so its shadow and spring-in
+/// overshoot are never clipped by the window bounds.
+pub const PILL_WIDTH: f64 = 160.0;
 /// Height of the pill window in logical pixels (matches tauri.conf.json).
-pub const PILL_HEIGHT: f64 = 44.0;
+pub const PILL_HEIGHT: f64 = 64.0;
 
-/// Distance from the bottom edge of the screen (logical px).
-const BOTTOM_MARGIN: f64 = 32.0;
+/// Distance from the bottom edge of the screen to the window (logical px).
+/// The pill is centered in the window, so its visible bottom edge sits
+/// ~13 px higher than this.
+const BOTTOM_MARGIN: f64 = 20.0;
 
 /// Apply `setIgnoresMouseEvents:true` to the pill window so clicks pass
 /// through to whatever's underneath it. MUST be called on the main thread.

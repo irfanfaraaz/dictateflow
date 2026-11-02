@@ -3,8 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <title>DictateFlow — pill</title>
+    <style>
+      /* Transparent window: override the settings page's body background
+         from globals.css, and give the root full size so the pill centers. */
+      html, body, #pill-root { background: transparent !important; width: 100%; height: 100%; margin: 0; overflow: hidden; }
+    </style>
   </head>
-  <body style="background:transparent">
+  <body>
     <div id="pill-root"></div>
     <script type="module" src="/src/pill.tsx"></script>
   </body>
