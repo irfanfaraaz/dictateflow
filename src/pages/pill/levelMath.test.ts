@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { barTargets, normalizeLevel, smoothLevel } from "./levelMath";
+import { barTargets, ease, normalizeLevel, smoothLevel } from "./levelMath";
 
 describe("normalizeLevel", () => {
   it("maps silence / mic noise floor to 0", () => {
@@ -32,9 +32,30 @@ describe("normalizeLevel", () => {
 
 describe("smoothLevel", () => {
   it("attacks faster than it releases", () => {
-    const up = smoothLevel(0, 1);
-    const down = 1 - smoothLevel(1, 0);
+    const up = smoothLevel(0, 1, 16.67);
+    const down = 1 - smoothLevel(1, 0, 16.67);
     expect(up).toBeGreaterThan(down);
+  });
+
+  it("is frame-rate independent (120 Hz ProMotion ≈ 60 Hz)", () => {
+    // Regression: per-frame easing ran 2× faster on 120 Hz displays.
+    const at60 = smoothLevel(0, 1, 1000 / 60);
+    const at120 = smoothLevel(smoothLevel(0, 1, 1000 / 120), 1, 1000 / 120);
+    expect(Math.abs(at60 - at120)).toBeLessThan(1e-6);
+  });
+
+  it("survives a huge dt (tab throttled / window hidden) without overshoot", () => {
+    const v = smoothLevel(0, 1, 5000);
+    expect(v).toBeLessThanOrEqual(1);
+    expect(v).toBeGreaterThan(0.99);
+  });
+});
+
+describe("ease", () => {
+  it("matches smoothLevel-style exponential decay and stays in range", () => {
+    expect(ease(0, 10, 0.35, 1000 / 60)).toBeCloseTo(3.5, 5);
+    expect(ease(0, 10, 0.35, 0)).toBe(0);
+    expect(ease(0, 10, 0.35, 1e6)).toBeCloseTo(10, 5);
   });
 });
 

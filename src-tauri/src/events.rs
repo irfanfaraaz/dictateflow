@@ -13,6 +13,7 @@
 
 #![allow(dead_code)] // surfaced by frontend incrementally
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -42,6 +43,9 @@ pub const EV_DICTATION_AUDIO_LEVEL: &str = "dictation:audio_level";
 /// Emitted the moment capture stops (hotkey released / VAD / cap) so the pill
 /// can switch from the live waveform to its "transcribing" animation.
 pub const EV_DICTATION_STOP: &str = "dictation:stop";
+/// Emitted just before the pill window hides so the pill can fade out
+/// instead of vanishing abruptly.
+pub const EV_DICTATION_END: &str = "dictation:end";
 pub const EV_DICTATION_INJECTED: &str = "dictation:injected";
 pub const EV_DICTATION_ERROR: &str = "dictation:error";
 /// PHASE 2 DEBUG ONLY — emitted with the raw transcript so the pill can
@@ -145,6 +149,10 @@ const LEVEL_EVENT_HZ: u64 = 30;
 /// 250 ms also overlaps the "pasting…" beat the pill renders on
 /// `dictation:injected`.
 const PILL_HIDE_DELAY: Duration = Duration::from_millis(250);
+
+/// How long the error pill stays up after a failed start (pill fades itself
+/// at ~2.2 s; the window is hidden just after).
+const START_ERROR_LINGER: Duration = Duration::from_millis(2500);
 
 /// Cadence at which the audio drain task copies samples out of the cpal
 /// ringbuf into the engine's mpsc. 100 ms is a comfortable mid-point — far
@@ -290,6 +298,7 @@ pub async fn start_dictation<R: Runtime>(app: &AppHandle<R>) -> Result<Dictation
                 }
                 info!(cap_seconds, "cap reached — triggering auto-stop");
                 audio_stop_for_cap.cancel();
+                request_auto_stop(&app_for_cap);
             }
             _ = audio_stop_for_cap.cancelled() => {
                 // Dictation ended before the cap — nothing to do.
@@ -298,6 +307,7 @@ pub async fn start_dictation<R: Runtime>(app: &AppHandle<R>) -> Result<Dictation
     });
 
     let audio_stop_for_vad = audio_stop.clone();
+    let app_for_vad = app.clone();
     let vad_task = tokio::spawn(async move {
         let mut detector = SilenceDetector::new(VadConfig::default());
         let mut rx = vad_level_rx;
@@ -309,6 +319,7 @@ pub async fn start_dictation<R: Runtime>(app: &AppHandle<R>) -> Result<Dictation
             if event == crate::audio::vad::SilenceEvent::SustainedSilence {
                 debug!("VAD: sustained silence detected — triggering early stop");
                 audio_stop_for_vad.cancel();
+                request_auto_stop(&app_for_vad);
                 return;
             }
         }
@@ -502,6 +513,7 @@ pub async fn stop_dictation<R: Runtime>(app: &AppHandle<R>, session: DictationSe
         audio_stop,
         cancel,
     } = session;
+    let gen = pill_gen();
 
     // 1. Stop the mic. The audio_pump's `audio_stop` will catch the residual
     //    ringbuf contents on its way out.
@@ -545,9 +557,9 @@ pub async fn stop_dictation<R: Runtime>(app: &AppHandle<R>, session: DictationSe
     // pump exited without injecting (silence transcript, error, timeout),
     // the pill simply falls through its idle state and fades.
 
-    // Brief overlap with the pill's "pasting…" beat before fade-out.
-    tokio::time::sleep(PILL_HIDE_DELAY).await;
-    hide_pill_async(app);
+    // Fade the pill out, then hide the window (skipped if a new dictation
+    // has already re-shown the pill).
+    fade_and_hide_pill(app, gen).await;
 
     // Revert tray to Idle. The error auto-revert path already does this for
     // error states; this covers the normal stop path.
@@ -562,14 +574,21 @@ async fn level_pump<R: Runtime>(app: AppHandle<R>, mut rx: tokio::sync::watch::R
     let interval = Duration::from_millis(1000 / LEVEL_EVENT_HZ);
     let mut last_emit = Instant::now() - interval;
 
+    // Peak-hold across the throttle window: the cpal callback updates ~every
+    // 10 ms, but we emit every ~33 ms. Sending only the *latest* value threw
+    // away 2 of 3 readings — including syllable peaks — so the waveform
+    // jittered instead of tracking the voice.
+    let mut peak = 0.0_f32;
+
     // `changed()` returns Err when the sender is dropped (capture stopped).
     while rx.changed().await.is_ok() {
+        peak = peak.max(*rx.borrow_and_update());
         let now = Instant::now();
         if now.duration_since(last_emit) < interval {
             continue;
         }
         last_emit = now;
-        let level = *rx.borrow_and_update();
+        let level = std::mem::take(&mut peak);
         if let Err(e) = app.emit(EV_DICTATION_AUDIO_LEVEL, AudioLevelPayload { rms: level }) {
             debug!(?e, "emit audio_level failed");
         }
@@ -662,7 +681,71 @@ fn emit_error<R: Runtime>(app: &AppHandle<R>, err: &EngineError) {
     }
 }
 
+/// Bumped every time the pill is shown. Delayed hides capture the value and
+/// skip if it changed — otherwise a quick re-press inside the 250 ms fade
+/// window would hide the *new* dictation's pill.
+static PILL_GEN: AtomicU64 = AtomicU64::new(0);
+
+fn pill_gen() -> u64 {
+    PILL_GEN.load(Ordering::SeqCst)
+}
+
+/// Fade the pill out (frontend) then hide the window — unless a newer
+/// dictation has shown the pill in the meantime.
+async fn fade_and_hide_pill<R: Runtime>(app: &AppHandle<R>, gen: u64) {
+    if pill_gen() != gen {
+        return;
+    }
+    if let Err(e) = app.emit(EV_DICTATION_END, ()) {
+        debug!(?e, "emit dictation:end failed");
+    }
+    tokio::time::sleep(PILL_HIDE_DELAY).await;
+    if pill_gen() == gen {
+        hide_pill_async(app);
+    }
+}
+
+/// Route a VAD / cap auto-stop through the controller so the full stop path
+/// runs: mic closes, pill switches to "transcribing", then fades out, and
+/// toggle state resets. Previously only `audio_stop` was cancelled, leaving
+/// the pill stuck in "listening" with a live mic until the next keypress.
+fn request_auto_stop<R: Runtime>(app: &AppHandle<R>) {
+    let app2 = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let ctrl = app2
+            .try_state::<Arc<crate::app::DictationController>>()
+            .map(|s| Arc::clone(s.inner()));
+        if let Some(ctrl) = ctrl {
+            ctrl.stop(app2.clone()).await;
+        }
+    });
+}
+
+/// Start failed (no API key, mic denied, engine load error…). Briefly show
+/// the pill in its error state so the keypress isn't silently ignored.
+pub fn flash_start_error<R: Runtime>(app: &AppHandle<R>, err: &anyhow::Error) {
+    show_pill_async(app);
+    let gen = pill_gen();
+    let payload = ErrorPayload {
+        code: "start_failed",
+        message: format!("{err:#}"),
+        recovery_hint: None,
+    };
+    if let Err(e) = app.emit(EV_DICTATION_ERROR, payload) {
+        warn!(?e, "emit dictation:error (start failed) failed");
+    }
+    let app2 = app.clone();
+    tauri::async_runtime::spawn(async move {
+        // Pill self-dismisses errors after ~2.2 s; hide the window after.
+        tokio::time::sleep(START_ERROR_LINGER).await;
+        if pill_gen() == gen {
+            hide_pill_async(&app2);
+        }
+    });
+}
+
 fn show_pill_async<R: Runtime>(app: &AppHandle<R>) {
+    PILL_GEN.fetch_add(1, Ordering::SeqCst);
     let app2 = app.clone();
     if let Err(e) = app.run_on_main_thread(move || {
         if let Err(e) = window::show_at_cursor(&app2) {
