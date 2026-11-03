@@ -163,6 +163,9 @@ pub fn show_at_cursor<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
     let ns_window = ns_window_ref(&window)?;
 
     configure_overlay(ns_window);
+    // Cheap, and we're on the main thread: re-resolve which keycode types "v"
+    // so ⌘V still works if the user switched keyboard layout (Dvorak etc.).
+    crate::inject::refresh_keyboard_layout();
 
     let screens = connected_screens(mtm);
     // SAFETY: class method with no preconditions; returns global coords.

@@ -28,8 +28,7 @@ use tracing::{debug, warn};
 
 use crate::permissions::{self, PermissionState};
 
-// Called by the integrator from the main-thread pill-show path.
-#[allow(unused_imports)]
+// Called from the main-thread pill-show path (window::show_at_cursor).
 pub use keystroke::refresh_keyboard_layout;
 
 /// Errors emitted by the inject pipeline.

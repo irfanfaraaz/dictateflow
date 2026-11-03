@@ -1,26 +1,32 @@
 //! Global-shortcut listener with live rebind + hold/toggle mode support.
 //!
-//! Phase 8 replaces the hard-coded F5 listener with a `HotkeyManager` that:
-//!   * Parses the persisted `hotkey.binding` string into a `Shortcut`.
-//!   * Dispatches `Pressed` / `Released` into `DictationController` using
-//!     whichever mode (Hold or Toggle) is current in settings at event time.
-//!   * Exposes `rebind()` to unregister the old shortcut and register a new
-//!     one atomically — called from the `rebind_hotkey` Tauri command.
+//! `HotkeyManager`:
+//!   * Validates + parses the persisted `hotkey.binding` string into a
+//!     `Shortcut` (see [`super::validate_binding`]).
+//!   * Forwards every `Pressed` / `Released` event into ONE unbounded channel
+//!     consumed by a single long-lived dispatcher task. The dispatcher awaits
+//!     `start` / `stop` / `toggle` on the `DictationController` sequentially,
+//!     so a release can never overtake the press that preceded it (the old
+//!     spawn-per-event design let `stop()` run while `start()` was still
+//!     building the session, leaving the mic live).
+//!   * Exposes `rebind()`, which registers the new shortcut *before*
+//!     unregistering the old one, so a failed rebind leaves the previous
+//!     hotkey working.
 //!
 //! ## Format contract
 //! The frontend key-capture logic produces strings like `"Cmd+Shift+Space"` or
-//! `"F5"`. The `global-hotkey` crate's `Shortcut::from_str` / `.parse()` is
-//! case-insensitive on modifier tokens and accepts `CMD`, `SHIFT`, `ALT`,
-//! `CTRL`, as well as key names like `SPACE`, `F5`, `A`, etc.
+//! `"F5"`. The `global-hotkey` crate's `Shortcut::from_str` is
+//! case-insensitive and accepts `CMD`/`COMMAND`/`SUPER`, `SHIFT`,
+//! `ALT`/`OPTION`, `CTRL`/`CONTROL`, and key names like `SPACE`, `F5`, `A`.
 
-use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
-use tracing::{info, warn};
+use tokio::sync::mpsc;
+use tracing::{debug, info, warn};
 
-use super::HotkeyError;
+use super::{same_binding, validate_binding, HotkeyError, DEFAULT_BINDING};
 use crate::app::DictationController;
 use crate::settings::schema::HotkeyMode;
 use crate::settings::SettingsStore;
@@ -28,128 +34,177 @@ use crate::settings::SettingsStore;
 /// Manages the currently-registered global shortcut and exposes a `rebind`
 /// method for live re-registration without restarting the app.
 ///
-/// Only one shortcut is active at a time. The `current` field tracks which
-/// `Shortcut` is registered so `rebind` can unregister it first.
+/// Only one shortcut is active at a time (briefly two during a rebind).
 pub struct HotkeyManager {
     current: Mutex<Option<Shortcut>>,
+    /// Sender side of the dispatcher channel. Created lazily on the first
+    /// registration (the dispatcher needs an `AppHandle`).
+    dispatch: Mutex<Option<mpsc::UnboundedSender<ShortcutState>>>,
 }
 
 impl HotkeyManager {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             current: Mutex::new(None),
+            dispatch: Mutex::new(None),
         })
     }
 
-    /// Register `binding_str` (e.g. `"F5"` or `"Cmd+Shift+Space"`).
+    /// Register `binding_str` (e.g. `"F5"` or `"Cmd+Shift+Space"`) as the
+    /// dictation hotkey.
     ///
-    /// Unregisters the previously-registered shortcut first. On parse failure
-    /// or plugin error returns `Err` — the old binding is already gone in that
-    /// case (best-effort), so callers should re-register the previous binding
-    /// if they need to preserve it.
+    /// The new shortcut is registered first; the old one is unregistered only
+    /// after that succeeds. On any error the previous binding stays active.
+    /// Re-binding to the shortcut that is already registered is a no-op.
     pub fn rebind<R: Runtime>(
         &self,
         app: &AppHandle<R>,
         binding_str: &str,
     ) -> Result<(), HotkeyError> {
-        let new_shortcut = Shortcut::from_str(binding_str)
-            .map_err(|e| HotkeyError::InvalidChord(binding_str.to_owned(), e.to_string()))?;
+        let new_shortcut = validate_binding(binding_str)?;
 
-        // Unregister the old shortcut (best-effort; log but don't fail).
-        {
-            let mut guard = match self.current.lock() {
+        let already = {
+            let guard = match self.current.lock() {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
-            if let Some(old) = guard.take() {
-                if let Err(e) = app.global_shortcut().unregister(old) {
-                    warn!(?e, "failed to unregister old shortcut (continuing)");
-                }
-            }
+            guard
+                .as_ref()
+                .is_some_and(|cur| same_binding(cur, &new_shortcut))
+        };
+        if already {
+            debug!(%binding_str, "hotkey unchanged — rebind is a no-op");
+            return Ok(());
         }
 
-        // Build the handler closure. It reads mode dynamically from settings
-        // so a mode-switch (hold → toggle) takes effect without a rebind.
-        let controller = app
-            .try_state::<Arc<DictationController>>()
-            .map(|s| s.inner().clone())
-            .ok_or_else(|| HotkeyError::Register("DictationController not in app state".into()))?;
-
-        let app_for_handler = app.clone();
-
+        let tx = self.dispatcher(app)?;
         app.global_shortcut()
             .on_shortcut(new_shortcut, move |_app, _sc, event| {
-                // Read current mode without holding anything across the spawn.
-                let mode: HotkeyMode = app_for_handler
-                    .try_state::<SettingsStore>()
-                    .map(|s| s.get().hotkey.mode)
-                    .unwrap_or(HotkeyMode::Hold);
-
-                match (mode, event.state()) {
-                    // Hold mode: start on press, stop on release.
-                    (HotkeyMode::Hold, ShortcutState::Pressed) => {
-                        let app = app_for_handler.clone();
-                        let ctrl = controller.clone();
-                        tauri::async_runtime::spawn(async move {
-                            ctrl.start(app).await;
-                        });
-                    }
-                    (HotkeyMode::Hold, ShortcutState::Released) => {
-                        let app = app_for_handler.clone();
-                        let ctrl = controller.clone();
-                        tauri::async_runtime::spawn(async move {
-                            ctrl.stop(app).await;
-                        });
-                    }
-
-                    // Toggle mode: press-to-start, press-again-to-stop.
-                    // Released events are ignored in toggle mode.
-                    (HotkeyMode::Toggle, ShortcutState::Pressed) => {
-                        let app = app_for_handler.clone();
-                        let ctrl = controller.clone();
-                        tauri::async_runtime::spawn(async move {
-                            ctrl.toggle(app).await;
-                        });
-                    }
-                    (HotkeyMode::Toggle, ShortcutState::Released) => {
-                        // intentionally ignored
-                    }
+                // Never block or spawn here: just enqueue. The dispatcher
+                // task applies the events in order.
+                if tx.send(event.state()).is_err() {
+                    warn!("hotkey dispatcher gone — dropping shortcut event");
                 }
             })
             .map_err(|e| HotkeyError::Register(e.to_string()))?;
 
-        // Record the newly-registered shortcut.
-        {
+        // New shortcut is live — now retire the old one.
+        let old = {
             let mut guard = match self.current.lock() {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
-            *guard = Some(new_shortcut);
+            guard.replace(new_shortcut)
+        };
+        if let Some(old) = old {
+            if let Err(e) = app.global_shortcut().unregister(old) {
+                warn!(?e, "failed to unregister previous shortcut (continuing)");
+            }
         }
 
         info!(%binding_str, "registered hotkey");
         Ok(())
     }
+
+    /// Return the dispatcher sender, spawning the dispatcher task on first use.
+    fn dispatcher<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+    ) -> Result<mpsc::UnboundedSender<ShortcutState>, HotkeyError> {
+        let mut guard = match self.dispatch.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if let Some(tx) = guard.as_ref() {
+            if !tx.is_closed() {
+                return Ok(tx.clone());
+            }
+        }
+        let controller = app
+            .try_state::<Arc<DictationController>>()
+            .map(|s| s.inner().clone())
+            .ok_or_else(|| HotkeyError::Register("DictationController not in app state".into()))?;
+        let (tx, rx) = mpsc::unbounded_channel();
+        tauri::async_runtime::spawn(run_dispatcher(app.clone(), controller, rx));
+        *guard = Some(tx.clone());
+        Ok(tx)
+    }
+}
+
+/// Single consumer of hotkey events. Each controller call is awaited before
+/// the next event is handled, so start/stop/toggle never interleave.
+async fn run_dispatcher<R: Runtime>(
+    app: AppHandle<R>,
+    controller: Arc<DictationController>,
+    mut rx: mpsc::UnboundedReceiver<ShortcutState>,
+) {
+    // macOS key-repeat can deliver several `Pressed` events for one physical
+    // press; only the first one after a `Released` counts.
+    let mut key_down = false;
+    while let Some(state) = rx.recv().await {
+        // Read mode at event time so a hold → toggle switch in Settings takes
+        // effect without a rebind.
+        let mode: HotkeyMode = app
+            .try_state::<SettingsStore>()
+            .map(|s| s.get().hotkey.mode)
+            .unwrap_or(HotkeyMode::Hold);
+
+        match state {
+            ShortcutState::Pressed => {
+                if key_down {
+                    debug!("ignoring repeated Pressed (key repeat)");
+                    continue;
+                }
+                key_down = true;
+                match mode {
+                    HotkeyMode::Hold => controller.start(&app).await,
+                    HotkeyMode::Toggle => controller.toggle(&app).await,
+                }
+            }
+            ShortcutState::Released => {
+                key_down = false;
+                match mode {
+                    HotkeyMode::Hold => controller.stop(&app).await,
+                    // Toggle mode acts on presses only.
+                    HotkeyMode::Toggle => {}
+                }
+            }
+        }
+    }
+    info!("hotkey dispatcher exiting (channel closed)");
 }
 
 /// Register the initial hotkey from settings at app startup.
 ///
-/// Falls back to `"F5"` if the stored binding fails to parse or register, so
-/// the app stays usable after a corrupt settings.json.
+/// The stored binding is validated like a user-entered one; if it is invalid
+/// (corrupt settings.json, or a chord saved before validation tightened) or
+/// fails to register, we fall back to [`DEFAULT_BINDING`] so the app stays
+/// usable.
 pub fn register_from_settings<R: Runtime>(app: &AppHandle<R>) -> Result<(), HotkeyError> {
-    let binding = app
+    let stored = app
         .try_state::<SettingsStore>()
         .map(|s| s.get().hotkey.binding)
-        .unwrap_or_else(|| "F5".into());
+        .unwrap_or_else(|| DEFAULT_BINDING.into());
 
     let manager = app
         .try_state::<Arc<HotkeyManager>>()
         .map(|s| s.inner().clone())
         .ok_or_else(|| HotkeyError::Register("HotkeyManager not in app state".into()))?;
 
+    let binding = match validate_binding(&stored) {
+        Ok(_) => stored,
+        Err(e) => {
+            warn!(?e, %stored, "stored hotkey is invalid, falling back to {DEFAULT_BINDING}");
+            DEFAULT_BINDING.to_owned()
+        }
+    };
+
     if let Err(e) = manager.rebind(app, &binding) {
-        warn!(?e, %binding, "failed to register configured hotkey, falling back to F5");
-        manager.rebind(app, "F5")?;
+        if binding == DEFAULT_BINDING {
+            return Err(e);
+        }
+        warn!(?e, %binding, "failed to register configured hotkey, falling back to {DEFAULT_BINDING}");
+        manager.rebind(app, DEFAULT_BINDING)?;
     }
 
     Ok(())

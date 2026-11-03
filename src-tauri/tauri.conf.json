@@ -31,7 +31,7 @@
         "label": "pill",
         "title": "dictateflow-pill",
         "url": "pill.html",
-        "width": 160,
+        "width": 320,
         "height": 64,
         "decorations": false,
         "transparent": true,

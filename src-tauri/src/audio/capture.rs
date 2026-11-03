@@ -5,28 +5,28 @@
 //! The cpal stream callback runs on a dedicated CoreAudio real-time thread.
 //! It MUST NOT:
 //! - allocate (no `Vec::push`, no `Box::new`, no `format!`)
-//! - lock (no `Mutex`, no `RwLock`, no blocking sync primitive)
+//! - lock (no `Mutex`, no `RwLock`, no channel `send` that takes a lock)
 //! - log (no `tracing::*`, no `println!` — all of those allocate or lock)
 //!
 //! Web analogue: imagine if `requestAnimationFrame` could miss frames and the
 //! user would *hear* the glitch. That's what happens when we miss a deadline
-//! in the audio thread. So we just `try_send`, drop on overflow, and move on.
+//! in the audio thread. So the callback only downmixes, pushes into a
+//! lock-free ringbuf (dropping on overflow), and publishes its RMS through an
+//! atomic [`LevelMeter`].
 //!
-//! # Sample-rate conversion
+//! # Sample rate
 //!
-//! cpal exposes whatever rate the device prefers (44.1k or 48k on most macs).
-//! whisper.cpp wants 16k mono f32. We do a 3-tap nearest-neighbour decimation
-//! inside the callback — cheap, deterministic, no allocation, "good enough"
-//! for speech recognition (whisper itself oversamples internally). A higher-
-//! quality resampler (e.g. `dasp_signal::interpolate` or `samplerate`) is
-//! deferred until measurable WER regression shows up.
+//! The callback emits mono f32 at the device's *native* rate (44.1k / 48k on
+//! most Macs, 24k or 16k/8k for Bluetooth headsets). Conversion to the
+//! engines' 16 kHz happens off the RT thread in the audio pump, via
+//! [`super::resample::Resampler`] (anti-alias low-pass + linear
+//! interpolation with state carried across chunks).
 
 // SAFETY: cpal's `Stream` is `!Send` because the underlying CoreAudio
 // AudioUnit is bound to its creating thread. We mark our owning wrapper
 // `Send + Sync` only because we never actually access the stream from any
-// thread other than the one that built it — the Mutex is just an owner
-// that we drop in place. All real cross-thread communication happens via
-// the lock-free ringbuf and the watch channel.
+// thread other than to pause + drop it — the Mutex is just an owner. All real
+// cross-thread communication happens via the lock-free ringbuf and atomics.
 #![allow(unsafe_code)]
 
 use std::sync::{
@@ -36,44 +36,40 @@ use std::sync::{
 
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
-    BuildStreamError, Sample, SampleFormat, Stream, StreamConfig,
+    BuildStreamError, Sample, SampleFormat, Stream, StreamConfig, StreamError,
 };
 use ringbuf::{
     traits::{Producer, Split},
     HeapCons, HeapProd, HeapRb,
 };
-use tokio::sync::watch;
 use tracing::{info, warn};
 
-use super::{AudioError, TARGET_SAMPLE_RATE};
+use super::level::LevelMeter;
+use super::AudioError;
 
-/// Capacity of the sample ring buffer in 16 kHz f32 frames.
-///
-/// 5 seconds at 16k = 80_000 samples; well above the consumer's 100 ms
-/// poll cadence so transient stalls (GC pauses, IPC congestion) don't drop
-/// audio.
-const RING_CAPACITY_FRAMES: usize = TARGET_SAMPLE_RATE as usize * 5;
+/// Seconds of native-rate mono audio the ring buffer can hold. Far above the
+/// consumer's 100 ms poll cadence so transient stalls don't drop audio.
+const RING_SECONDS: usize = 5;
 
-/// Handle returned by [`AudioCapture::start`].
+/// Mono frames converted per inner-loop pass in the RT callback. The
+/// callback loops over arbitrarily large device buffers in pieces of this
+/// size, so nothing is ever truncated.
+const CALLBACK_SCRATCH_FRAMES: usize = 1024;
+
+/// Handle returned by [`start_with_device`].
 ///
 /// Holding this keeps the stream alive. Dropping it stops capture.
 pub struct CaptureSession {
-    // Stream is `!Send` on some backends. We never move it across threads;
-    // the Mutex is purely to satisfy the borrow checker — we only ever lock
-    // it from the owning task to call `pause()` on stop.
     _stream: StreamHandle,
     stopped: Arc<AtomicBool>,
 }
 
-/// Thin wrapper so `Stream` (which is `!Send` on macOS) lives behind a guard
-/// that we can drop in the same task that built it. We never actually share
-/// the inner stream across threads.
+/// Thin wrapper so `Stream` (which is `!Send` on macOS) can live inside the
+/// session. We never touch the inner stream except to pause + drop it.
 struct StreamHandle(Mutex<Option<Stream>>);
 
-// SAFETY: cpal's `Stream` is `!Send` because the underlying CoreAudio
-// AudioUnit is bound to its creating thread. We only use the Mutex as an
-// owner that we drop from the same task that built the capture. We never
-// access the stream from another thread.
+// SAFETY: see the module-level note. The stream is only paused and dropped
+// through this wrapper; it is never used concurrently.
 unsafe impl Send for StreamHandle {}
 unsafe impl Sync for StreamHandle {}
 
@@ -89,40 +85,66 @@ impl Drop for CaptureSession {
     }
 }
 
-/// Starts the default input device and returns a consumer + RMS receiver.
-///
-/// The session handle MUST be kept alive for the duration of capture; dropping
-/// it stops the stream.
-pub fn start() -> Result<(CaptureSession, HeapCons<f32>, watch::Receiver<f32>, u32), AudioError> {
+/// Lock-free health flags shared between cpal's callbacks and the dictation
+/// monitor (which turns them into user-facing errors).
+#[derive(Debug, Default)]
+pub struct CaptureHealth {
+    /// Set once any non-zero sample arrives. macOS delivers pure digital
+    /// silence when mic permission is missing or the device is muted.
+    saw_signal: AtomicBool,
+    /// Set by the error callback when the device disappears (unplugged
+    /// headset, Bluetooth disconnect).
+    device_lost: AtomicBool,
+}
+
+impl CaptureHealth {
+    pub fn saw_signal(&self) -> bool {
+        self.saw_signal.load(Ordering::Acquire)
+    }
+
+    pub fn device_lost(&self) -> bool {
+        self.device_lost.load(Ordering::Acquire)
+    }
+}
+
+/// Everything a started capture hands to the dictation pipeline.
+pub struct CaptureStart {
+    /// Keep alive for the duration of capture; dropping it stops the stream.
+    pub session: CaptureSession,
+    /// Mono f32 samples at `sample_rate`.
+    pub consumer: HeapCons<f32>,
+    /// Peak-hold RMS level (see [`LevelMeter`]).
+    pub level: Arc<LevelMeter>,
+    pub health: Arc<CaptureHealth>,
+    /// Native device rate of the samples in `consumer`.
+    pub sample_rate: u32,
+}
+
+/// Starts the default input device.
+pub fn start() -> Result<CaptureStart, AudioError> {
     start_with_device(None)
 }
 
-/// Starts audio capture on a specific device (or default if `device_id` is `None`).
+/// Starts audio capture on a specific device (or default if `device_id` is
+/// `None`).
 ///
-/// # Arguments
+/// `device_id` is a device name as returned by `list_input_devices`. If no
+/// device with that name exists we log a warning and fall back to the
+/// system default.
 ///
-/// - `device_id`: Optional device name (as returned by `list_input_devices`).
-///   If `None`, uses the system default device.
-///   If the device name is not found, logs a warning and falls back to default.
-///
-/// # Returns
-///
-/// A tuple of (CaptureSession, audio samples consumer, RMS level receiver).
-/// The session handle MUST be kept alive for the duration of capture; dropping
-/// it stops the stream.
-pub fn start_with_device(
-    device_id: Option<&str>,
-) -> Result<(CaptureSession, HeapCons<f32>, watch::Receiver<f32>, u32), AudioError> {
+/// This opens CoreAudio synchronously (can take tens of ms); call it from a
+/// blocking context (`tokio::task::block_in_place`) rather than directly on
+/// an async worker.
+pub fn start_with_device(device_id: Option<&str>) -> Result<CaptureStart, AudioError> {
     let host = cpal::default_host();
     let device = match device_id {
         None => host
             .default_input_device()
             .ok_or(AudioError::NoDefaultDevice)?,
         Some(target_name) => {
-            // Try to find the device by name.
             let found = host
                 .input_devices()
-                .map_err(|e| AudioError::BuildStream(format!("enumerate devices: {}", e)))?
+                .map_err(|e| AudioError::BuildStream(format!("enumerate devices: {e}")))?
                 .find(|d| d.name().map(|n| n == target_name).unwrap_or(false));
 
             match found {
@@ -144,67 +166,39 @@ pub fn start_with_device(
         .map_err(|e| AudioError::UnsupportedConfig(e.to_string()))?;
 
     let device_name = device.name().unwrap_or_else(|_| "<unknown>".into());
-    let device_sample_rate = supported.sample_rate().0;
-    let channels = supported.channels() as usize;
+    let sample_rate = supported.sample_rate().0;
+    let channels = usize::from(supported.channels());
     let sample_format = supported.sample_format();
     let config: StreamConfig = supported.config();
 
-    // Decimation factor (device → 16k). Round to nearest integer; if the
-    // device is already at 16k, the factor is 1 and we copy verbatim.
-    let decim = (device_sample_rate as f32 / TARGET_SAMPLE_RATE as f32).round() as usize;
-    let decim = decim.max(1);
-    let effective_rate = device_sample_rate / decim as u32;
-
     info!(
         device = %device_name,
-        device_rate = device_sample_rate,
-        effective_rate,
+        sample_rate,
         channels,
         format = ?sample_format,
-        decim,
         "audio capture starting"
     );
 
-    let rb = HeapRb::<f32>::new(RING_CAPACITY_FRAMES);
+    let capacity = (sample_rate as usize).max(8_000) * RING_SECONDS;
+    let rb = HeapRb::<f32>::new(capacity);
     let (producer, consumer) = rb.split();
-    let (level_tx, level_rx) = watch::channel(0.0_f32);
 
+    let level = Arc::new(LevelMeter::new());
+    let health = Arc::new(CaptureHealth::default());
     let stopped = Arc::new(AtomicBool::new(false));
-    let stopped_cb = stopped.clone();
-
-    // One-shot "first samples received" signal. Set in the callback the
-    // first time we observe any input. A sibling tokio task at the call
-    // site can poll this for a few seconds and warn if it never flips.
-    let saw_samples = Arc::new(AtomicBool::new(false));
-    let saw_samples_cb = saw_samples.clone();
 
     let stream = build_stream(
         &device,
         &config,
         sample_format,
         channels,
-        decim,
-        producer,
-        level_tx,
-        stopped_cb,
-        saw_samples_cb,
+        CallbackShared {
+            producer,
+            level: level.clone(),
+            health: health.clone(),
+            stopped: stopped.clone(),
+        },
     )?;
-
-    // Health check: if cpal hasn't fired the callback within 1 s, the
-    // device is silent — very common with permission grant on the wrong
-    // bundle, with virtual audio drivers, or with a muted/disconnected
-    // input. Log loud so the user can see it in `tail -f`.
-    let saw_for_check = saw_samples.clone();
-    let device_for_check = device_name.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        if !saw_for_check.load(Ordering::Acquire) {
-            warn!(
-                device = %device_for_check,
-                "audio capture: NO samples received after 1s — mic permission denied, device muted, or cpal opened a silent virtual device"
-            );
-        }
-    });
 
     stream
         .play()
@@ -215,47 +209,50 @@ pub fn start_with_device(
         stopped,
     };
 
-    Ok((session, consumer, level_rx, effective_rate))
+    Ok(CaptureStart {
+        session,
+        consumer,
+        level,
+        health,
+        sample_rate,
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
+/// State moved into the RT callback.
+struct CallbackShared {
+    producer: HeapProd<f32>,
+    level: Arc<LevelMeter>,
+    health: Arc<CaptureHealth>,
+    stopped: Arc<AtomicBool>,
+}
+
 fn build_stream(
     device: &cpal::Device,
     config: &StreamConfig,
     fmt: SampleFormat,
     channels: usize,
-    decim: usize,
-    producer: HeapProd<f32>,
-    level_tx: watch::Sender<f32>,
-    stopped: Arc<AtomicBool>,
-    saw_samples: Arc<AtomicBool>,
+    shared: CallbackShared,
 ) -> Result<Stream, AudioError> {
-    let err_cb = |err| {
-        // Stream errors land on a separate callback; we can't `?` from inside
-        // the data callback, but we can at least log here (this runs on
-        // cpal's error thread, NOT the RT audio thread).
-        warn!(?err, "cpal stream error");
+    let health_for_err = shared.health.clone();
+    // Runs on cpal's error thread, NOT the RT audio thread, so logging is ok.
+    let err_cb = move |err: StreamError| match err {
+        StreamError::DeviceNotAvailable => {
+            warn!("cpal stream error: input device no longer available");
+            health_for_err.device_lost.store(true, Ordering::Release);
+        }
+        other => warn!(?other, "cpal stream error"),
     };
 
     let result: Result<Stream, BuildStreamError> = match fmt {
-        SampleFormat::F32 => device.build_input_stream(
-            config,
-            make_callback::<f32>(channels, decim, producer, level_tx, stopped, saw_samples),
-            err_cb,
-            None,
-        ),
-        SampleFormat::I16 => device.build_input_stream(
-            config,
-            make_callback::<i16>(channels, decim, producer, level_tx, stopped, saw_samples),
-            err_cb,
-            None,
-        ),
-        SampleFormat::U16 => device.build_input_stream(
-            config,
-            make_callback::<u16>(channels, decim, producer, level_tx, stopped, saw_samples),
-            err_cb,
-            None,
-        ),
+        SampleFormat::F32 => {
+            device.build_input_stream(config, make_callback::<f32>(channels, shared), err_cb, None)
+        }
+        SampleFormat::I16 => {
+            device.build_input_stream(config, make_callback::<i16>(channels, shared), err_cb, None)
+        }
+        SampleFormat::U16 => {
+            device.build_input_stream(config, make_callback::<u16>(channels, shared), err_cb, None)
+        }
         other => {
             return Err(AudioError::UnsupportedConfig(format!(
                 "sample format {other:?} not supported"
@@ -269,79 +266,59 @@ fn build_stream(
 /// Build the per-buffer audio callback.
 ///
 /// Generic over the device's native sample type so we convert to f32 once
-/// at the source. The callback is FnMut + Send + 'static — no captures may
-/// require allocation or locking on the hot path.
+/// at the source. No captures allocate or lock on the hot path.
 fn make_callback<S>(
     channels: usize,
-    decim: usize,
-    mut producer: HeapProd<f32>,
-    level_tx: watch::Sender<f32>,
-    stopped: Arc<AtomicBool>,
-    saw_samples: Arc<AtomicBool>,
+    shared: CallbackShared,
 ) -> impl FnMut(&[S], &cpal::InputCallbackInfo) + Send + 'static
 where
     S: Sample + cpal::SizedSample,
     f32: cpal::FromSample<S>,
 {
-    // Pre-size a stack-friendly scratch using a const-cap array.
-    // We never grow this — it's a fixed-size local buffer.
-    const SCRATCH: usize = 2048;
-    let mut scratch = [0.0_f32; SCRATCH];
+    let CallbackShared {
+        mut producer,
+        level,
+        health,
+        stopped,
+    } = shared;
+    let channels = channels.max(1);
+    let mut scratch = [0.0_f32; CALLBACK_SCRATCH_FRAMES];
 
     move |input: &[S], _info: &cpal::InputCallbackInfo| {
         if stopped.load(Ordering::Acquire) {
             return;
         }
 
-        // First-callback signal for the post-start health check. Atomic
-        // store with Release pairs with the health-check task's Acquire.
-        // Cheap on the hot path — modern ARM has dedicated atomic ops.
-        if !input.is_empty() {
-            saw_samples.store(true, Ordering::Release);
-        }
-
-        // Step 1: deinterleave to mono + decimate to ~16k, into the local
-        // stack scratch. No allocation, no lock.
-        //
-        // Frames per channel-tick = channels samples; we average channels
-        // into a single mono sample, then take 1 of every `decim` frames.
-        let frames = input.len() / channels.max(1);
-        let mut written = 0usize;
         let mut sum_sq = 0.0_f32;
+        let mut frames_total = 0usize;
+        let mut nonzero = false;
 
-        let mut frame_idx = 0;
-        while frame_idx < frames && written < SCRATCH {
-            // Decimate by keeping only every Nth frame (nearest-neighbour).
-            if frame_idx % decim == 0 {
-                let base = frame_idx * channels;
+        // Downmix to mono in scratch-sized pieces; push each piece.
+        for block in input.chunks(CALLBACK_SCRATCH_FRAMES * channels) {
+            let mut n = 0usize;
+            for (slot, frame) in scratch.iter_mut().zip(block.chunks_exact(channels)) {
                 let mut acc = 0.0_f32;
-                for ch in 0..channels {
-                    let s: f32 = input[base + ch].to_sample::<f32>();
-                    acc += s;
+                for &s in frame {
+                    acc += s.to_sample::<f32>();
                 }
                 let mono = acc / channels as f32;
-                scratch[written] = mono;
+                *slot = mono;
                 sum_sq += mono * mono;
-                written += 1;
+                nonzero |= mono != 0.0;
+                n += 1;
             }
-            frame_idx += 1;
+            // On overflow push_slice drops the excess — better than blocking
+            // the RT thread. (Bookkept silently; logging would allocate.)
+            let _ = producer.push_slice(&scratch[..n]);
+            frames_total += n;
         }
 
-        if written == 0 {
+        if frames_total == 0 {
             return;
         }
-
-        // Step 2: push slice to the lock-free ringbuf. On overflow we drop
-        // — better than blocking the RT thread.
-        let pushed = producer.push_slice(&scratch[..written]);
-        if pushed < written {
-            // Overflow happens when the consumer task is too slow. Bookkeep
-            // silently — logging here would allocate.
+        if nonzero && !health.saw_signal.load(Ordering::Relaxed) {
+            health.saw_signal.store(true, Ordering::Release);
         }
-
-        // Step 3: publish RMS on the watch channel. send() returns Err only
-        // when all receivers are dropped, which is fine during teardown.
-        let level = (sum_sq / written as f32).sqrt();
-        let _ = level_tx.send(level);
+        level.record((sum_sq / frames_total as f32).sqrt());
     }
 }
