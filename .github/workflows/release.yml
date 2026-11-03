@@ -99,7 +99,9 @@ jobs:
           [ -n "$id" ] || { echo "::error::No 'DictateFlow Self-Signed' identity in MACOS_SIGNING_P12"; exit 1; }
           cp /usr/bin/true "$RUNNER_TEMP/sign-probe"
           codesign --force --sign "$id" "$RUNNER_TEMP/sign-probe"
-          codesign -dv "$RUNNER_TEMP/sign-probe" 2>&1 | grep -E '^(Authority|Signature)='
+          # Authority= lines only appear at -dvv. Fail if the probe isn't
+          # actually signed by our certificate (e.g. fell back to ad-hoc).
+          codesign -dvv "$RUNNER_TEMP/sign-probe" 2>&1 | grep -x 'Authority=DictateFlow Self-Signed'
           echo "APPLE_SIGNING_IDENTITY=$id" >> "$GITHUB_ENV"
 
       - name: Build app and publish release
