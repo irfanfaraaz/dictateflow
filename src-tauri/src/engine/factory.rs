@@ -36,24 +36,42 @@ use crate::settings::schema::{EngineKind, Settings};
 /// caches the result in [`AppState`]).
 /// For `Scribe`: reads the API key from Keychain. Returns
 /// [`EngineError::MissingApiKey`] if none is stored.
+///
+/// `settings.language` is baked into the engine (`"auto"` → autodetect), so
+/// the cache must be invalidated when it changes.
+///
+/// Synchronous and potentially slow (model load, Keychain IPC): async callers
+/// must run it inside `tokio::task::spawn_blocking`.
 pub fn build<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> EngineResult<Arc<dyn Engine>> {
+    let language = language_option(&settings.language);
     match settings.engine {
         EngineKind::Local => {
             let model_path = models::resolve_path(app, &settings.local.model)?;
-            let engine = LocalEngine::load(&model_path)?;
+            let engine = LocalEngine::load(&model_path)?.with_language(language);
             Ok(Arc::new(engine))
         }
-        EngineKind::Scribe => build_scribe(),
+        EngineKind::Scribe => build_scribe(language),
+    }
+}
+
+/// Map the settings language string to an engine language code.
+/// `"auto"` (any case) and blank mean "autodetect" → `None`.
+pub(crate) fn language_option(language: &str) -> Option<String> {
+    let lang = language.trim();
+    if lang.is_empty() || lang.eq_ignore_ascii_case("auto") {
+        None
+    } else {
+        Some(lang.to_ascii_lowercase())
     }
 }
 
 /// Scribe arm separated into its own fn so it can be unit-tested without a
 /// real `AppHandle` (Scribe doesn't need model resolution).
-pub(crate) fn build_scribe() -> EngineResult<Arc<dyn Engine>> {
+pub(crate) fn build_scribe(language: Option<String>) -> EngineResult<Arc<dyn Engine>> {
     let key = keychain::get(ELEVENLABS_KEY)
         .map_err(|e| EngineError::Inference(format!("keychain: {e}")))?
         .ok_or(EngineError::MissingApiKey)?;
-    Ok(Arc::new(ScribeEngine::new(key)))
+    Ok(Arc::new(ScribeEngine::new(key).with_language(language)))
 }
 
 #[cfg(test)]
@@ -72,10 +90,19 @@ mod tests {
         // Pre-clean in case a prior test run left a stale entry.
         let _ = keychain::delete(ELEVENLABS_KEY);
 
-        let result = build_scribe();
+        let result = build_scribe(None);
         assert!(
             matches!(result, Err(EngineError::MissingApiKey)),
             "expected Err(MissingApiKey)"
         );
+    }
+
+    #[test]
+    fn auto_language_means_autodetect() {
+        assert_eq!(language_option("auto"), None);
+        assert_eq!(language_option("AUTO"), None);
+        assert_eq!(language_option("  "), None);
+        assert_eq!(language_option("en"), Some("en".to_string()));
+        assert_eq!(language_option(" DE "), Some("de".to_string()));
     }
 }

@@ -1,7 +1,7 @@
 import { useEffect, useRef, type MutableRefObject } from "react";
 import { barTargets, ease, normalizeLevel, processingTargets, smoothLevel } from "./levelMath";
 
-export type WaveMode = "listening" | "processing" | "error";
+export type WaveMode = "listening" | "processing" | "idle";
 
 const BAR_COUNT = 9;
 const BAR_WIDTH = 3;
@@ -18,7 +18,7 @@ const MAX_DT_MS = 64;
 const COLORS: Record<WaveMode, string> = {
   listening: "#f4f1ec",
   processing: "rgba(244, 241, 236, 0.55)",
-  error: "#ef5a4c",
+  idle: "rgba(244, 241, 236, 0.35)",
 };
 
 export const WAVEFORM_WIDTH = BAR_COUNT * BAR_WIDTH + (BAR_COUNT - 1) * BAR_GAP;
@@ -45,24 +45,23 @@ export function Waveform({ levelRef, mode, active, reducedMotion = false, onFram
   reducedRef.current = reducedMotion;
   onFrameRef.current = onFrame;
 
-  // Canvas sizing is done once; it survives pause/resume of the loop.
   useEffect(() => {
+    if (!active) return;
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext("2d");
     if (!canvas || !ctx) return;
+
+    // Size per session: the pill follows the cursor across displays, so the
+    // device pixel ratio can change between dictations (1× external ↔ 2×
+    // Retina) — sizing once left the bars blurry after a move.
     const dpr = window.devicePixelRatio || 1;
     canvas.width = Math.round(WAVEFORM_WIDTH * dpr);
     canvas.height = Math.round(MAX_BAR_HEIGHT * dpr);
     canvas.style.width = `${WAVEFORM_WIDTH}px`;
     canvas.style.height = `${MAX_BAR_HEIGHT}px`;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  }, []);
-
-  useEffect(() => {
-    if (!active) return;
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext("2d");
-    if (!canvas || !ctx) return;
+    // roundRect needs Safari 16+ WebKit; fall back to square bars.
+    const hasRoundRect = typeof ctx.roundRect === "function";
 
     // Fresh state per session: bars start at rest, no stale frame.
     const heights = new Float32Array(BAR_COUNT).fill(MIN_BAR_HEIGHT);
@@ -70,7 +69,7 @@ export function Waveform({ levelRef, mode, active, reducedMotion = false, onFram
     let last = performance.now();
     let raf = 0;
 
-    const tick = (now: number) => {
+    const draw = (now: number) => {
       const dt = Math.min(MAX_DT_MS, Math.max(0, now - last));
       last = now;
       const m = modeRef.current;
@@ -100,10 +99,20 @@ export function Waveform({ levelRef, mode, active, reducedMotion = false, onFram
         const x = i * (BAR_WIDTH + BAR_GAP);
         const y = (MAX_BAR_HEIGHT - h) / 2;
         ctx.beginPath();
-        ctx.roundRect(x, y, BAR_WIDTH, h, BAR_WIDTH / 2);
+        if (hasRoundRect) ctx.roundRect(x, y, BAR_WIDTH, h, BAR_WIDTH / 2);
+        else ctx.rect(x, y, BAR_WIDTH, h);
         ctx.fill();
       }
-      raf = requestAnimationFrame(tick);
+    };
+
+    // Always reschedule, even if a frame throws — otherwise one exception
+    // freezes the bars until the next dictation.
+    const tick = (now: number) => {
+      try {
+        draw(now);
+      } finally {
+        raf = requestAnimationFrame(tick);
+      }
     };
 
     raf = requestAnimationFrame(tick);

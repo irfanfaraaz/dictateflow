@@ -23,18 +23,19 @@
 
 use std::path::PathBuf;
 
+use dictateflow_lib::__test_only::{AudioChunk, Engine, LocalEngine};
 use futures::StreamExt;
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use dictateflow_lib::__test_only::{AudioChunk, Engine, LocalEngine};
 
 const JFK_WAV: &[u8] = include_bytes!("fixtures/jfk.wav");
 const JFK_WAV_SHA256: &str = "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e";
 
 fn dev_model_path() -> PathBuf {
     let home = std::env::var_os("HOME").expect("HOME must be set");
-    PathBuf::from(home).join("Library/Application Support/com.dictateflow.app/models/ggml-small.bin")
+    PathBuf::from(home)
+        .join("Library/Application Support/com.dictateflow.app/models/ggml-small.bin")
 }
 
 /// Decode 16-bit PCM mono @ 16 kHz from the fixture WAV into f32 in [-1, 1].
@@ -76,14 +77,15 @@ mod hex {
     }
 }
 
-/// Streaming test: feed audio in 250 ms increments and assert that at least
-/// one intermediate (`is_final = false`) partial is emitted before the final.
+/// Streaming test: feed audio in 250 ms increments (real-time pacing) and
+/// assert the engine accumulates it and emits one final transcript. The
+/// local engine no longer emits interim (`is_final = false`) partials.
 ///
 /// Ignored for the same reason as `local_engine_transcribes_jfk`: requires the
 /// downloaded model. Run with `--ignored` locally.
 #[tokio::test]
 #[ignore = "requires ggml-small.bin in ~/Library/Application Support/com.dictateflow.app/models/ — see scripts/download-model.sh"]
-async fn streaming_emits_intermediate_partials_before_final() {
+async fn paced_streaming_yields_single_final() {
     let model = dev_model_path();
     if !model.exists() {
         panic!(
@@ -98,8 +100,8 @@ async fn streaming_emits_intermediate_partials_before_final() {
     let cancel = CancellationToken::new();
 
     // Feed audio in 250 ms increments (4_000 samples) over a background task.
-    // The streaming engine fires an intermediate inference after every 16_000
-    // samples (= 1 s), so after 4 chunks (1 s) we should see a partial.
+    // The engine accumulates every chunk and transcribes once the channel
+    // closes.
     let samples = decode_jfk_samples();
     let tx_for_feeder = tx.clone();
     tokio::spawn(async move {
@@ -125,23 +127,9 @@ async fn streaming_emits_intermediate_partials_before_final() {
 
     let mut stream = engine.stream(rx, cancel).await.expect("engine.stream");
 
-    let mut saw_intermediate = false;
-    let mut final_text = String::new();
-
-    while let Some(item) = stream.next().await {
-        let p = item.expect("partial");
-        if p.is_final {
-            final_text = p.text;
-            break;
-        } else {
-            saw_intermediate = true;
-        }
-    }
-
-    assert!(
-        saw_intermediate,
-        "expected at least one is_final=false partial before the final"
-    );
+    let p = stream.next().await.expect("one result").expect("partial");
+    assert!(p.is_final, "local engine should only emit a final result");
+    let final_text = p.text;
 
     let lower = final_text.to_lowercase();
     assert!(
@@ -169,7 +157,12 @@ async fn local_engine_transcribes_jfk() {
     // Feed the entire fixture as one chunk; the batch engine will accumulate
     // it, see the sender drop, and run a single inference.
     let samples = decode_jfk_samples();
-    tx.send(AudioChunk { samples, sample_rate: 16_000 }).await.expect("send chunk");
+    tx.send(AudioChunk {
+        samples,
+        sample_rate: 16_000,
+    })
+    .await
+    .expect("send chunk");
     drop(tx);
 
     let mut stream = engine.stream(rx, cancel).await.expect("engine.stream");

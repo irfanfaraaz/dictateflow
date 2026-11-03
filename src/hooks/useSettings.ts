@@ -15,6 +15,10 @@ interface UseSettings {
   update: (patch: DeepPartial<Settings>) => Promise<void>;
   /** Initial load complete + cross-window listener wired. */
   ready: boolean;
+  /** Set when the initial load failed; `settings` stays null. */
+  error: string | null;
+  /** Retry the initial load after an error. */
+  retry: () => void;
 }
 
 /**
@@ -35,22 +39,34 @@ interface UseSettings {
 export function useSettings(): UseSettings {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [ready, setReady] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
   // We keep the latest known-good snapshot in a ref for rollback. Using a
   // ref (not state) avoids stale closures inside `update`.
   const lastConfirmed = useRef<Settings | null>(null);
+  // Latest optimistic snapshot: successive quick updates layer onto this,
+  // not onto `lastConfirmed`, so a second click never briefly undoes the
+  // first one.
+  const optimisticRef = useRef<Settings | null>(null);
+  // Only the newest in-flight update may apply its response; an older one
+  // resolving late must not overwrite a newer snapshot.
+  const seqRef = useRef(0);
 
-  // Initial load.
+  // Initial load (re-runs on retry).
   useEffect(() => {
     let cancelled = false;
+    setError(null);
     getSettings()
       .then((s) => {
         if (cancelled) return;
         setSettings(s);
         lastConfirmed.current = s;
+        optimisticRef.current = s;
       })
       .catch((err) => {
         // eslint-disable-next-line no-console
         console.error("[settings] initial load failed", err);
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
       })
       .finally(() => {
         if (!cancelled) setReady(true);
@@ -58,7 +74,9 @@ export function useSettings(): UseSettings {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [attempt]);
+
+  const retry = useCallback(() => setAttempt((a) => a + 1), []);
 
   // Cross-window sync. The other window's `update_settings` call emits
   // `settings:updated`; we mirror it locally so radios stay in lockstep.
@@ -73,6 +91,7 @@ export function useSettings(): UseSettings {
         return;
       }
       lastConfirmed.current = parsed.data;
+      optimisticRef.current = parsed.data;
       setSettings(parsed.data);
     })
       .then((un) => {
@@ -90,14 +109,18 @@ export function useSettings(): UseSettings {
   }, []);
 
   const update = useCallback(async (patch: DeepPartial<Settings>) => {
-    const prev = lastConfirmed.current;
+    const prev = optimisticRef.current ?? lastConfirmed.current;
+    const seq = ++seqRef.current;
     if (!prev) {
       // No baseline yet — defer to the synchronous Rust path; we cannot
       // optimistically apply a patch without something to merge into.
       try {
         const next = await updateSettings(patch);
         lastConfirmed.current = next;
-        setSettings(next);
+        if (seq === seqRef.current) {
+          optimisticRef.current = next;
+          setSettings(next);
+        }
       } catch (err) {
         // eslint-disable-next-line no-console
         console.error("[settings] update failed", err);
@@ -109,15 +132,21 @@ export function useSettings(): UseSettings {
     // Optimistic merge — same shape as the Rust merger: object keys recurse,
     // arrays/scalars replace.
     const optimistic = mergeDeep(prev, patch) as Settings;
+    optimisticRef.current = optimistic;
     setSettings(optimistic);
     try {
       const next = await updateSettings(patch);
       lastConfirmed.current = next;
-      setSettings(next);
+      // Rust applies patches in order, so the newest response is the full
+      // truth; older responses are superseded.
+      if (seq === seqRef.current) {
+        optimisticRef.current = next;
+        setSettings(next);
+      }
     } catch (err) {
-      // Roll back to the last confirmed snapshot. We do NOT roll back to
-      // `prev` because another optimistic update may have layered on top —
-      // the ref always holds the most-recent confirmed value.
+      // Roll back to the last confirmed snapshot (pending optimistic layers
+      // are dropped with it).
+      optimisticRef.current = lastConfirmed.current;
       setSettings(lastConfirmed.current);
       // eslint-disable-next-line no-console
       console.error("[settings] update failed; rolled back", err);
@@ -125,7 +154,7 @@ export function useSettings(): UseSettings {
     }
   }, []);
 
-  return { settings, update, ready };
+  return { settings, update, ready, error, retry };
 }
 
 /**

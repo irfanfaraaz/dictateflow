@@ -1,0 +1,88 @@
+# Checks main on a real Apple Silicon Mac:
+# frontend typecheck + tests, then Rust fmt, clippy (warnings are errors,
+# per README) and unit tests.
+name: CI
+
+# Runs only for main (pushes and PRs targeting main). Can also be started
+# by hand from the Actions tab (workflow_dispatch).
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm exec tsc -b
+
+      - name: Frontend tests
+        run: pnpm exec vitest run
+
+      # tauri::generate_context! embeds ../dist at compile time.
+      - name: Build frontend
+        run: pnpm exec vite build
+
+      - name: cargo fmt
+        working-directory: src-tauri
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test --all-features
+
+  # Runs the real curl|bash installer on a clean Mac against the latest
+  # published release: JSON parsing, checksum, mount, atomic install, launch.
+  installer-smoke:
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run install.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/install.sh
+      - name: Verify install
+        run: |
+          test -d /Applications/DictateFlow.app
+          plutil -extract CFBundleIdentifier raw /Applications/DictateFlow.app/Contents/Info.plist | grep -qx com.dictateflow.app
+          ! xattr -p com.apple.quarantine /Applications/DictateFlow.app 2>/dev/null
+          echo "installed $(plutil -extract CFBundleShortVersionString raw /Applications/DictateFlow.app/Contents/Info.plist)"
+      - name: Re-run (upgrade path quits the running app and swaps atomically)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/install.sh && test -d /Applications/DictateFlow.app && ! ls -d /Applications/.DictateFlow.app.installing 2>/dev/null

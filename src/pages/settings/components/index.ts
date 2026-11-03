@@ -4,3 +4,4 @@ export { DossierCard } from "./DossierCard";
 export { DefinitionList, type DefinitionRow } from "./DefinitionList";
 export { InlineConfirm } from "./InlineConfirm";
 export { Banner } from "./Banner";
+export { SaveError, useSaveError } from "./SaveError";

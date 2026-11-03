@@ -1,6 +1,6 @@
 [package]
 name = "dictateflow"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 
 [lib]
@@ -45,6 +45,10 @@ objc2-app-kit = { version = "0.2", features = [
     "NSScreen",
     "NSWorkspace",
     "NSSound",
+    "NSPasteboard",
+    "NSPasteboardItem",
+    "NSRunningApplication",
+    "libc",
 ] }
 objc2-foundation = { version = "0.2", features = [
     "NSGeometry",
@@ -52,6 +56,8 @@ objc2-foundation = { version = "0.2", features = [
     "NSURL",
     "NSArray",
     "NSThread",
+    "NSData",
+    "NSRange",
 ] }
 core-graphics = "0.24"
 core-foundation = "0.10"
@@ -65,9 +71,6 @@ hound = "3.5"
 # Resource resolution for the bundled GGML model
 dirs = "5"
 
-# Clipboard read/write for Phase 3 paste injection
-arboard = "3.4"
-
 # macOS Keychain (Phase 7.1: BYOK secret storage)
 security-framework = "2"
 
@@ -77,6 +80,8 @@ url = "2"
 base64 = "0.22"
 reqwest = { version = "0.12", features = ["rustls-tls", "stream"] }
 sha2 = "0.10"
+tauri-plugin-single-instance = "2"
+libc = "0.2"
 
 [dev-dependencies]
 

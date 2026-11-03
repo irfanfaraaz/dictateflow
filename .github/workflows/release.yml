@@ -33,6 +33,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # A tag that doesn't match the app version would ship e.g. a "v0.3.0"
+      # release containing DictateFlow_0.2.0_aarch64.dmg.
+      - name: Check tag matches app version
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          conf="$(jq -r .version src-tauri/tauri.conf.json)"
+          cargo_ver="$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -n 1)"
+          pkg="$(jq -r .version package.json)"
+          echo "tag=$TAG tauri.conf=$conf Cargo.toml=$cargo_ver package.json=$pkg"
+          [ "$TAG" = "v$conf" ] || { echo "::error::Tag $TAG does not match tauri.conf.json version $conf"; exit 1; }
+          [ "$conf" = "$cargo_ver" ] && [ "$conf" = "$pkg" ] || { echo "::error::Version mismatch between tauri.conf.json, Cargo.toml and package.json"; exit 1; }
+
       - uses: pnpm/action-setup@v4
         with:
           version: 10
@@ -64,7 +77,9 @@ jobs:
           tagName: ${{ inputs.tag || github.ref_name }}
           releaseName: DictateFlow ${{ inputs.tag || github.ref_name }}
           releaseCommitish: ${{ github.sha }}
-          releaseDraft: false
+          # Draft first: the release only becomes "latest" (what install.sh
+          # downloads) after every asset has been uploaded.
+          releaseDraft: true
           prerelease: false
           releaseBody: |
             ## Install
@@ -79,3 +94,9 @@ jobs:
             Applications run `xattr -cr /Applications/DictateFlow.app` once.
 
             Requires macOS on Apple Silicon (M1+).
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest

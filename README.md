@@ -16,10 +16,10 @@ curl -fsSL https://raw.githubusercontent.com/irfanfaraaz/dictateflow/main/script
 
 It downloads the latest `.dmg` from Releases, copies **DictateFlow.app** into `/Applications`, and launches it. Because the file is fetched with `curl` instead of a browser, macOS doesn't attach the quarantine flag, so the unsigned app opens without the "unidentified developer" warning. Run the same command again to update.
 
-Prefer to do it by hand? Same idea, step by step:
+Prefer to do it by hand? Same idea, step by step (replace `0.3.0` with the [latest version](https://github.com/irfanfaraaz/dictateflow/releases/latest)):
 
 ```bash
-curl -fL -o /tmp/DictateFlow.dmg https://github.com/irfanfaraaz/dictateflow/releases/download/v0.1.0/DictateFlow_0.1.0_aarch64.dmg
+curl -fL -o /tmp/DictateFlow.dmg https://github.com/irfanfaraaz/dictateflow/releases/download/v0.3.0/DictateFlow_0.3.0_aarch64.dmg
 hdiutil attach /tmp/DictateFlow.dmg -nobrowse -mountpoint /tmp/dictateflow-dmg
 ditto /tmp/dictateflow-dmg/DictateFlow.app /Applications/DictateFlow.app
 hdiutil detach /tmp/dictateflow-dmg && open /Applications/DictateFlow.app

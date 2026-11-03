@@ -2,15 +2,18 @@ import { useEffect, useState } from "react";
 import { DefinitionList, DossierCard } from "../components";
 import { useSettingsContext } from "../SettingsContext";
 import { getPermissions, openPath, resolveLogPath, openLogDir } from "@/ipc/commands";
+import { getVersion } from "@tauri-apps/api/app";
 import type { PermissionsSnapshot } from "@/schemas/settings";
 
-const APP_VERSION = "0.1.0";
 const RELEASES_URL = "https://github.com/irfanfaraaz/dictateflow/releases";
 
 export function About(): JSX.Element {
   const { settings, update } = useSettingsContext();
   const [perms, setPerms] = useState<PermissionsSnapshot | null>(null);
   const [logPath, setLogPath] = useState<string>("");
+  // Read from the bundle (tauri.conf.json) — the hard-coded constant had
+  // already drifted ("0.1.0" shown in the 0.2.0 build).
+  const [version, setVersion] = useState<string>("");
 
   useEffect(() => {
     let cancelled = false;
@@ -21,6 +24,14 @@ export function About(): JSX.Element {
       .catch((err) => {
         // eslint-disable-next-line no-console
         console.error("[about] permissions fetch failed", err);
+      });
+    void getVersion()
+      .then((v) => {
+        if (!cancelled) setVersion(v);
+      })
+      .catch((err) => {
+        // eslint-disable-next-line no-console
+        console.error("[about] version fetch failed", err);
       });
     void resolveLogPath()
       .then((p) => {
@@ -45,7 +56,7 @@ export function About(): JSX.Element {
       <DossierCard header="about">
         <DefinitionList
           rows={[
-            { term: "version", value: APP_VERSION },
+            { term: "version", value: version || "—" },
             { term: "engine", value: engineLabel },
             { term: "mic", value: perms?.microphone ?? "…" },
             { term: "accessibility", value: perms?.accessibility ?? "…" },

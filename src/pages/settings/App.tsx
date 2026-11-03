@@ -37,7 +37,7 @@ const TABS: Record<string, () => JSX.Element> = {
  * instant swap.
  */
 export function SettingsApp(): JSX.Element {
-  const { settings, update, ready } = useSettings();
+  const { settings, update, ready, error, retry } = useSettings();
   const { installed } = useModelDownloads();
   const [active, setActive] = useState<string>("engine");
   const reduced = useReducedMotion();
@@ -45,6 +45,26 @@ export function SettingsApp(): JSX.Element {
   const [dismissed, setDismissed] = useState<boolean>(
     () => localStorage.getItem(BANNER_DISMISSED_KEY) === "true",
   );
+
+  if (ready && !settings) {
+    // Initial load failed (e.g. unreadable settings). Same chrome as the
+    // loading state, plus a way out instead of an endless "loading…".
+    return (
+      <main className="min-h-screen flex flex-col items-center justify-center gap-4 bg-ink text-muted font-mono text-sm">
+        <p role="alert" className="text-text">
+          couldn&apos;t load settings
+        </p>
+        {error ? <p className="max-w-[60ch] text-center text-muted">{error}</p> : null}
+        <button
+          type="button"
+          onClick={retry}
+          className="border border-rule px-3 py-1 text-text hover:border-accent focus-visible:border-accent"
+        >
+          retry
+        </button>
+      </main>
+    );
+  }
 
   if (!ready || !settings) {
     return (

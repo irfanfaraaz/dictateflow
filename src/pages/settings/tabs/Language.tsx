@@ -1,4 +1,4 @@
-import { DossierCard } from "../components";
+import { DossierCard, SaveError, useSaveError } from "../components";
 import { useSettingsContext } from "../SettingsContext";
 
 const LANGUAGES: { code: string; label: string }[] = [
@@ -25,6 +25,7 @@ const LANGUAGES: { code: string; label: string }[] = [
  */
 export function Language(): JSX.Element {
   const { settings, update } = useSettingsContext();
+  const { error, guard } = useSaveError();
 
   return (
     <DossierCard header="language">
@@ -39,7 +40,7 @@ export function Language(): JSX.Element {
           id="language-select"
           value={settings.language}
           onChange={(e) => {
-            void update({ language: e.target.value });
+            guard(update({ language: e.target.value }));
           }}
           className="bg-ink border border-rule px-3 py-1 font-mono text-sm text-text"
         >
@@ -54,6 +55,9 @@ export function Language(): JSX.Element {
         auto-detect uses whisper's own language identifier — pick a specific
         code only if detection misroutes you.
       </p>
+      <div className="mt-2">
+        <SaveError error={error} />
+      </div>
     </DossierCard>
   );
 }

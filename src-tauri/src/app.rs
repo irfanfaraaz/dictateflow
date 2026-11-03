@@ -1,24 +1,28 @@
 //! AppState + DictationController.
 //!
 //! `AppState` is the shared container Tauri threads through `tauri::State`.
-//! `DictationController` owns the cross-task wiring: hotkey down spawns it,
-//! hotkey up tells it to stop. Phase 1 wired audio + the pill window;
-//! Phase 2 adds the engine pipeline (LocalEngine via whisper-rs).
+//! `DictationController` owns the start/stop state machine for a dictation.
+//! Hotkey events reach it through the single dispatcher task in
+//! `hotkey::listener`; VAD / cap / error auto-stops reach it through
+//! `events::request_auto_stop`.
 //!
-//! We avoid `Arc<Mutex<…>>` for cross-task state where possible — the
-//! controller uses an internal `Mutex<Option<Session>>` only at start/stop
-//! transitions, and never holds the lock across `.await`.
+//! Every transition (start, stop, toggle) holds an async `transition` mutex
+//! for its whole duration, so a stop that arrives while `start_dictation` is
+//! still building the session waits for the session to be stored and then
+//! stops it — the mic can never be left live by a lost stop. The inner
+//! `Mutex<Option<Session>>` is a plain std mutex that is only locked for a
+//! `take()` / `replace()` and never across an `.await`.
 
 #![allow(dead_code)] // wired into commands as later phases land
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use tauri::{AppHandle, Runtime};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::audio::capture::CaptureSession;
 use crate::engine::Engine;
@@ -96,84 +100,52 @@ impl AppState {
 /// expose this beyond the crate boundary.
 pub struct DictationSession {
     pub(crate) capture: CaptureSession,
-    pub(crate) level_pump: JoinHandle<()>,
-    /// Pumps samples from the cpal ringbuf into the engine's mpsc.
-    /// Exits when `audio_stop` fires; on exit the captured `audio_tx` is
-    /// dropped, which closes the engine's input channel.
+    /// 30 Hz poller: emits `dictation:audio_level`, runs the toggle-mode VAD,
+    /// and watches mic health (silent / disconnected device).
+    pub(crate) monitor: JoinHandle<()>,
+    /// Pumps samples from the cpal ringbuf through the resampler into the
+    /// engine's mpsc. Exits when `audio_stop` fires; on exit the captured
+    /// `audio_tx` is dropped, which closes the engine's input channel.
     pub(crate) audio_pump: JoinHandle<()>,
-    /// Drains the engine's partial stream and emits Tauri events.
+    /// Drains the engine's partial stream, pastes the transcript and emits
+    /// Tauri events.
     pub(crate) engine_pump: JoinHandle<()>,
-    /// Watches RMS levels and triggers early-stop on sustained silence (Phase 6).
-    /// Calls `audio_stop.cancel()` when `SilenceDetector` fires `SustainedSilence`.
-    pub(crate) vad_task: JoinHandle<()>,
-    /// Engine-aware cap timer (Phase 8). Calls `audio_stop.cancel()` when the
-    /// session hits `local_max_seconds` or `scribe_max_seconds`. Aborted on
-    /// normal stop so a short dictation doesn't wait for the full cap.
+    /// Engine-aware cap timer. Requests an auto-stop when the session hits
+    /// `local_max_seconds` or `scribe_max_seconds`. Aborted on normal stop so
+    /// a short dictation doesn't wait for the full cap.
     pub(crate) cap_task: JoinHandle<()>,
     /// Signals the audio pump to drain residual samples and exit. Distinct
     /// from `cancel` because end-of-dictation is a *clean* stream-close, not
     /// an abort.
     pub(crate) audio_stop: CancellationToken,
-    /// Fired only on cancel-on-restart (Phase 9). Aborts in-flight inference.
+    /// Aborts in-flight inference / the WebSocket. Fired only when the
+    /// engine misses the stop timeout — a newer dictation never cancels an
+    /// older one that is still finishing (its transcript would be lost).
     pub(crate) cancel: CancellationToken,
+    /// Pill generation this session showed. Effects of a finishing session
+    /// (tray, pill events) are suppressed once a newer session owns the pill.
+    pub(crate) gen: u64,
+    /// Set by the engine pump / monitor when they surface a `dictation:error`
+    /// so the stop path lets the error linger instead of fading immediately.
+    pub(crate) errored: Arc<AtomicBool>,
 }
 
-impl DictationSession {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        capture: CaptureSession,
-        level_pump: JoinHandle<()>,
-        audio_pump: JoinHandle<()>,
-        engine_pump: JoinHandle<()>,
-        vad_task: JoinHandle<()>,
-        cap_task: JoinHandle<()>,
-        audio_stop: CancellationToken,
-        cancel: CancellationToken,
-    ) -> Self {
-        Self {
-            capture,
-            level_pump,
-            audio_pump,
-            engine_pump,
-            vad_task,
-            cap_task,
-            audio_stop,
-            cancel,
-        }
-    }
-}
-
-/// Coordinates "hotkey down → start" and "hotkey up → stop". Holds the
-/// in-flight dictation behind a Mutex; we only ever lock for the duration
-/// of a `take()` or `replace()` and never across an await point.
+/// Coordinates "hotkey down → start" and "hotkey up → stop".
 ///
-/// `toggle_active` tracks whether a toggle-mode dictation is in progress so
-/// the second keypress knows to stop rather than start. It mirrors the logical
-/// state of `inflight`: set when we successfully start, cleared when we stop.
-/// An `AtomicBool` is sufficient — no await involved.
-///
-/// # Cancel-on-restart (Phase 9)
-/// `cancel_token` stores the `CancellationToken` from the most recently
-/// started session. When a new hotkey-down arrives while the prior session is
-/// still finalizing (i.e., `stop_dictation` is awaiting its `engine_pump`),
-/// we fire the token so the old inference task aborts immediately rather than
-/// blocking the new dictation. The token is replaced atomically under the same
-/// Mutex lock, so there is no window where two live tokens can co-exist.
+/// See the module docs for the locking discipline. Toggle mode needs no
+/// separate flag: "is a dictation in flight?" is answered by `inflight`
+/// under the transition lock.
 pub struct DictationController {
+    /// Serialises start / stop / toggle. Held across `.await` on purpose.
+    transition: tokio::sync::Mutex<()>,
     inflight: Mutex<Option<DictationSession>>,
-    /// The cancel token of the most recent session, kept alive so a new
-    /// start can abort stale finalization.
-    last_cancel: Mutex<Option<CancellationToken>>,
-    /// Toggle-mode active flag. `true` = dictation is running.
-    toggle_active: AtomicBool,
 }
 
 impl Default for DictationController {
     fn default() -> Self {
         Self {
+            transition: tokio::sync::Mutex::new(()),
             inflight: Mutex::new(None),
-            last_cancel: Mutex::new(None),
-            toggle_active: AtomicBool::new(false),
         }
     }
 }
@@ -183,75 +155,54 @@ impl DictationController {
         Arc::new(Self::default())
     }
 
-    /// Toggle-mode handler: start if not active, stop if active.
-    pub async fn toggle<R: Runtime>(self: Arc<Self>, app: AppHandle<R>) {
-        // swap returns the *previous* value; if it was false we should start.
-        let was_active = self.toggle_active.swap(true, Ordering::SeqCst);
-        if was_active {
-            // Already running — stop.
-            self.toggle_active.store(false, Ordering::SeqCst);
-            Arc::clone(&self).stop(app).await;
+    fn is_active(&self) -> bool {
+        match self.inflight.lock() {
+            Ok(g) => g.is_some(),
+            Err(p) => p.into_inner().is_some(),
+        }
+    }
+
+    /// Toggle-mode handler: start if idle, stop if a dictation is running.
+    pub async fn toggle<R: Runtime>(&self, app: &AppHandle<R>) {
+        let _transition = self.transition.lock().await;
+        if self.is_active() {
+            self.stop_locked(app, None).await;
         } else {
-            // Not running — start.
-            Arc::clone(&self).start(app).await;
-            // If start failed, reset the flag.
-            let guard = match self.inflight.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            if guard.is_none() {
-                self.toggle_active.store(false, Ordering::SeqCst);
-            }
+            self.start_locked(app).await;
         }
     }
 
     /// Begin a dictation. No-op if one is already in flight.
     ///
-    /// Cancel-on-restart: if a prior session is still finalizing (i.e., the
-    /// inflight slot is empty but `last_cancel` is live because `stop()` took
-    /// the session but `stop_dictation` hasn't returned yet), fire the old
-    /// cancel token so the stale inference aborts and the new dictation starts
-    /// cleanly without risking a double-paste.
-    pub async fn start<R: Runtime>(self: Arc<Self>, app: AppHandle<R>) {
-        // Grab and fire any stale cancel token from a prior session that is
-        // still finalizing. Also check `inflight` in the same lock scope.
-        let already_running = {
-            let guard = match self.inflight.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            guard.is_some()
-        };
+    /// A previous dictation that is still finishing (transcribing / pasting)
+    /// is left alone: it pastes before this one does (see the paste chain in
+    /// `events.rs`).
+    pub async fn start<R: Runtime>(&self, app: &AppHandle<R>) {
+        let _transition = self.transition.lock().await;
+        self.start_locked(app).await;
+    }
 
-        if already_running {
+    /// End the in-flight dictation. No-op if none is running.
+    pub async fn stop<R: Runtime>(&self, app: &AppHandle<R>) {
+        let _transition = self.transition.lock().await;
+        self.stop_locked(app, None).await;
+    }
+
+    /// Stop the in-flight dictation only if it is the session with pill
+    /// generation `gen`. Used by auto-stops (VAD, cap, engine error, mic
+    /// failure) so a late request from an old session can't stop a new one.
+    pub async fn stop_session<R: Runtime>(&self, app: &AppHandle<R>, gen: u64) {
+        let _transition = self.transition.lock().await;
+        self.stop_locked(app, Some(gen)).await;
+    }
+
+    async fn start_locked<R: Runtime>(&self, app: &AppHandle<R>) {
+        if self.is_active() {
             info!("start ignored: dictation already in flight");
             return;
         }
-
-        // Fire stale cancel token from a prior session that is in teardown.
-        {
-            let guard = match self.last_cancel.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            if let Some(token) = guard.as_ref() {
-                if !token.is_cancelled() {
-                    info!("cancel-on-restart: firing stale session cancel token");
-                    token.cancel();
-                }
-            }
-        }
-
-        match crate::events::start_dictation(&app).await {
+        match crate::events::start_dictation(app).await {
             Ok(session) => {
-                // Store cancel token for potential future cancel-on-restart.
-                {
-                    let mut cancel_guard = match self.last_cancel.lock() {
-                        Ok(g) => g,
-                        Err(p) => p.into_inner(),
-                    };
-                    *cancel_guard = Some(session.cancel.clone());
-                }
                 let mut guard = match self.inflight.lock() {
                     Ok(g) => g,
                     Err(p) => p.into_inner(),
@@ -259,26 +210,28 @@ impl DictationController {
                 *guard = Some(session);
             }
             Err(e) => {
-                warn!(?e, "start_dictation failed");
-                crate::events::flash_start_error(&app, &e);
+                warn!(code = e.payload.code, detail = %e.detail, "start_dictation failed");
+                crate::events::flash_start_error(app, &e);
             }
         }
     }
 
-    /// End the in-flight dictation. No-op if none is running.
-    pub async fn stop<R: Runtime>(self: Arc<Self>, app: AppHandle<R>) {
+    async fn stop_locked<R: Runtime>(&self, app: &AppHandle<R>, only_gen: Option<u64>) {
         let session = {
             let mut guard = match self.inflight.lock() {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
-            guard.take()
+            match only_gen {
+                Some(gen) if guard.as_ref().map(|s| s.gen) != Some(gen) => {
+                    debug!(gen, "auto-stop ignored: that session already ended");
+                    None
+                }
+                _ => guard.take(),
+            }
         };
-        // Clear toggle flag regardless of mode so a mode-switch mid-session
-        // doesn't leave toggle_active stale.
-        self.toggle_active.store(false, Ordering::SeqCst);
         if let Some(session) = session {
-            crate::events::stop_dictation(&app, session).await;
+            crate::events::stop_dictation(app, session).await;
         }
     }
 }

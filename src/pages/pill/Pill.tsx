@@ -8,16 +8,26 @@ import {
   dictationStartSchema,
   dictationStopSchema,
   errorSchema,
+  injectedSchema,
   EVENT,
+  type DictationError,
 } from "@/schemas/events";
 import { Waveform, type WaveMode } from "@/pages/pill/Waveform";
+import { countdownLabel, describeError, type PillMessage } from "@/pages/pill/pillCopy";
 
-/** Error pill lingers this long, then fades itself out (toggle mode never
- *  gets a release event to dismiss it). */
-const ERROR_DISMISS_MS = 2200;
+/** Error / notice pill lingers this long, then fades itself out (toggle
+ *  mode never gets a release event to dismiss it). */
+const MESSAGE_DISMISS_MS = 2600;
 
-const DOT_LISTEN = "#ef5a4c";
-const DOT_PROCESS = "rgba(244,241,236,0.45)";
+type PillMode = "listening" | "processing" | "success" | "message";
+
+const C = {
+  rec: "#ef5a4c",
+  muted: "rgba(244,241,236,0.45)",
+  ok: "#5ccf86",
+  warn: "#f2b24c",
+  text: "#f4f1ec",
+};
 
 /**
  * Floating dictation pill.
@@ -27,21 +37,25 @@ const DOT_PROCESS = "rgba(244,241,236,0.45)";
  *    changes (start / stop / end / error) — a handful per dictation.
  *  - The rec dot is animated from the canvas rAF loop via direct style
  *    writes, using the same smoothed envelope as the bars.
- *  - One motion node, never remounted; in on `start`, out on `end`.
- *  - The window (160×64, transparent) is larger than the pill so the shadow
- *    and spring overshoot are never clipped.
+ *  - One motion node, never remounted; in on `start`, out on `end`; width
+ *    changes (message text) animate via framer `layout`.
+ *  - The window is larger than the pill so shadow, spring overshoot and the
+ *    widened message state are never clipped.
  */
 export function Pill() {
   const reducedMotion = useReducedMotion();
   const [visible, setVisible] = useState(false);
   const [running, setRunning] = useState(false); // rAF loop on/off
-  const [mode, setMode] = useState<WaveMode>("listening");
+  const [mode, setMode] = useState<PillMode>("listening");
+  const [message, setMessage] = useState<PillMessage | null>(null);
   const [shakeKey, setShakeKey] = useState(0);
+  const [countdown, setCountdown] = useState<string | null>(null);
 
   const levelRef = useRef(0);
   const ringRef = useRef<HTMLSpanElement | null>(null);
   const coreRef = useRef<HTMLSpanElement | null>(null);
   const dismissTimer = useRef<number | null>(null);
+  const capRef = useRef<{ startedAt: number; capSeconds: number } | null>(null);
 
   const clearDismiss = () => {
     if (dismissTimer.current !== null) window.clearTimeout(dismissTimer.current);
@@ -49,9 +63,12 @@ export function Pill() {
   };
 
   const handlers = useRef({
-    start: () => {
+    start: (capSeconds: number) => {
       clearDismiss();
       levelRef.current = 0;
+      capRef.current = { startedAt: performance.now(), capSeconds };
+      setCountdown(null);
+      setMessage(null);
       setMode("listening");
       setRunning(true);
       setVisible(true);
@@ -61,33 +78,69 @@ export function Pill() {
     },
     stop: () => {
       levelRef.current = 0;
-      setMode((m) => (m === "error" ? m : "processing"));
+      capRef.current = null;
+      setCountdown(null);
+      setMode((m) => (m === "message" ? m : "processing"));
+    },
+    injected: () => {
+      setMode((m) => (m === "message" ? m : "success"));
     },
     end: () => {
-      // Errors keep their own dismiss timer so the user can read them.
+      // Messages keep their own dismiss timer so the user can read them.
       if (dismissTimer.current === null) setVisible(false);
     },
-    error: () => {
+    error: (e: DictationError) => {
       clearDismiss();
       levelRef.current = 0;
-      setMode("error");
-      setShakeKey((k) => k + 1);
+      capRef.current = null;
+      setCountdown(null);
+      const msg = describeError(e);
+      setMessage(msg);
+      setMode("message");
+      if (msg.tone === "error") setShakeKey((k) => k + 1);
       setRunning(true);
       setVisible(true);
       dismissTimer.current = window.setTimeout(() => {
         dismissTimer.current = null;
         setVisible(false);
-      }, ERROR_DISMISS_MS);
+      }, MESSAGE_DISMISS_MS);
     },
   });
 
   useEffect(() => clearDismiss, []);
 
-  useEvent(EVENT.start, dictationStartSchema, () => handlers.current.start());
+  // The waveform (which drives the dot pulse each frame) isn't mounted in
+  // message mode, so reset the pulse explicitly when leaving "listening" —
+  // otherwise the ring keeps its last frame as a stray halo.
+  useEffect(() => {
+    if (mode === "listening") return;
+    if (ringRef.current) {
+      ringRef.current.style.opacity = "0";
+      ringRef.current.style.transform = "scale(1)";
+    }
+    if (coreRef.current) coreRef.current.style.transform = "scale(1)";
+  }, [mode]);
+
+  // Countdown in the last seconds before the engine's duration cap. Ticks
+  // only while listening; re-renders only when the label changes.
+  useEffect(() => {
+    if (!visible || mode !== "listening") return;
+    const id = window.setInterval(() => {
+      const cap = capRef.current;
+      if (!cap) return;
+      const elapsed = (performance.now() - cap.startedAt) / 1000;
+      const next = countdownLabel(cap.capSeconds, elapsed);
+      setCountdown((prev) => (prev === next ? prev : next));
+    }, 250);
+    return () => window.clearInterval(id);
+  }, [visible, mode]);
+
+  useEvent(EVENT.start, dictationStartSchema, (p) => handlers.current.start(p.cap_seconds));
   useEvent(EVENT.audioLevel, audioLevelSchema, (p) => handlers.current.level(p.rms));
   useEvent(EVENT.stop, dictationStopSchema, () => handlers.current.stop());
+  useEvent(EVENT.injected, injectedSchema, () => handlers.current.injected());
   useEvent(EVENT.end, dictationEndSchema, () => handlers.current.end());
-  useEvent(EVENT.error, errorSchema, () => handlers.current.error());
+  useEvent(EVENT.error, errorSchema, (p) => handlers.current.error(p));
 
   // Per-frame rec-dot pulse — direct DOM writes, no React render.
   const onFrame = useCallback(
@@ -104,20 +157,36 @@ export function Pill() {
     [mode, reducedMotion],
   );
 
+  const waveMode: WaveMode =
+    mode === "listening" ? "listening" : mode === "processing" ? "processing" : "idle";
   const label =
-    mode === "listening" ? "Listening" : mode === "processing" ? "Transcribing" : "Dictation error";
-  const dotColor = mode === "processing" ? DOT_PROCESS : DOT_LISTEN;
+    mode === "listening"
+      ? countdown
+        ? `Listening, ${countdown} left`
+        : "Listening"
+      : mode === "processing"
+        ? "Transcribing"
+        : mode === "success"
+          ? "Pasted"
+          : (message?.text ?? "Dictation error");
+  const dotColor =
+    mode === "processing"
+      ? C.muted
+      : mode === "success"
+        ? C.ok
+        : mode === "message"
+          ? message?.tone === "notice"
+            ? C.warn
+            : C.rec
+          : C.rec;
 
-  const shown = { opacity: 1, scale: 1, y: 0 };
-  const hidden = reducedMotion
-    ? { opacity: 0, scale: 1, y: 0 }
-    : { opacity: 0, scale: 0.86, y: 8 };
+  const hidden = reducedMotion ? { opacity: 0, scale: 1, y: 0 } : { opacity: 0, scale: 0.86, y: 8 };
 
   return (
     <div className="flex h-full w-full items-center justify-center">
       <motion.div
         initial={hidden}
-        animate={visible ? shown : hidden}
+        animate={visible ? { opacity: 1, scale: 1, y: 0 } : hidden}
         transition={
           reducedMotion
             ? { duration: 0.12 }
@@ -133,17 +202,22 @@ export function Pill() {
         aria-live="polite"
         aria-label={visible ? label : undefined}
       >
-        {/* Inner node carries the error shake so it never fights the
-            enter/exit spring on the outer node. */}
+        {/* Inner node carries the error shake and width animation so they
+            never fight the enter/exit spring on the outer node. */}
         <motion.div
           key={shakeKey}
+          layout={!reducedMotion}
           animate={
-            mode === "error" && !reducedMotion && shakeKey > 0
+            mode === "message" && message?.tone === "error" && !reducedMotion && shakeKey > 0
               ? { x: [0, -4, 4, -3, 3, 0] }
               : { x: 0 }
           }
-          transition={{ duration: 0.35, ease: "easeInOut" }}
-          className="flex h-[38px] items-center gap-[10px] rounded-full px-[14px]"
+          transition={{
+            duration: 0.35,
+            ease: "easeInOut",
+            layout: { type: "spring", stiffness: 520, damping: 38 },
+          }}
+          className="flex h-[38px] max-w-[300px] items-center gap-[10px] overflow-hidden rounded-full px-[14px]"
           style={{
             background:
               "linear-gradient(180deg, rgba(34,33,36,0.96) 0%, rgba(16,15,17,0.96) 100%)",
@@ -151,35 +225,96 @@ export function Pill() {
               "0 0 0 0.5px rgba(255,255,255,0.14) inset, 0 1px 0 rgba(255,255,255,0.06) inset, 0 6px 18px rgba(0,0,0,0.35), 0 0 0 0.5px rgba(0,0,0,0.6)",
           }}
         >
-          <span
-            className="relative flex h-[8px] w-[8px] items-center justify-center"
+          <motion.span
+            layout={!reducedMotion ? "position" : false}
+            className="relative flex h-[10px] w-[10px] shrink-0 items-center justify-center"
             aria-hidden="true"
           >
-            <span
-              ref={ringRef}
-              className="absolute inset-0 rounded-full"
-              style={{ background: dotColor, opacity: 0, willChange: "transform, opacity" }}
-            />
-            <span
-              ref={coreRef}
-              className="relative h-[8px] w-[8px] rounded-full"
+            {mode === "success" ? (
+              <CheckIcon color={C.ok} animate={!reducedMotion} />
+            ) : (
+              <>
+                <span
+                  ref={ringRef}
+                  className="absolute inset-[1px] rounded-full"
+                  style={{ background: dotColor, opacity: 0, willChange: "transform, opacity" }}
+                />
+                <span
+                  ref={coreRef}
+                  className="relative h-[8px] w-[8px] rounded-full"
+                  style={{
+                    background: dotColor,
+                    transition: "background-color 220ms ease, box-shadow 220ms ease",
+                    boxShadow:
+                      mode === "listening" || (mode === "message" && message?.tone === "error")
+                        ? "0 0 6px rgba(239,90,76,0.55)"
+                        : "none",
+                    willChange: "transform",
+                  }}
+                />
+              </>
+            )}
+          </motion.span>
+
+          {mode === "message" && message ? (
+            <motion.span
+              layout={!reducedMotion ? "position" : false}
+              initial={reducedMotion ? false : { opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ duration: 0.18, delay: reducedMotion ? 0 : 0.06 }}
+              className="truncate whitespace-nowrap text-[12px] font-medium leading-none"
               style={{
-                background: dotColor,
-                transition: "background-color 220ms ease, box-shadow 220ms ease",
-                boxShadow: mode === "processing" ? "none" : "0 0 6px rgba(239,90,76,0.55)",
-                willChange: "transform",
+                color: C.text,
+                fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif",
+                letterSpacing: "-0.005em",
               }}
-            />
-          </span>
-          <Waveform
-            levelRef={levelRef}
-            mode={mode}
-            active={running}
-            reducedMotion={reducedMotion}
-            onFrame={onFrame}
-          />
+              title={message.text}
+            >
+              {message.text}
+            </motion.span>
+          ) : (
+            <>
+              <Waveform
+                levelRef={levelRef}
+                mode={waveMode}
+                active={running}
+                reducedMotion={reducedMotion}
+                onFrame={onFrame}
+              />
+              {countdown && mode === "listening" && (
+                <span
+                  className="text-[11px] font-medium tabular-nums leading-none"
+                  style={{
+                    color: C.warn,
+                    fontFamily:
+                      "-apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif",
+                  }}
+                  aria-hidden="true"
+                >
+                  {countdown}
+                </span>
+              )}
+            </>
+          )}
         </motion.div>
       </motion.div>
     </div>
+  );
+}
+
+function CheckIcon({ color, animate }: { color: string; animate: boolean }) {
+  return (
+    <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
+      <motion.path
+        d="M1.5 5.2 L4 7.6 L8.6 2.6"
+        stroke={color}
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        initial={animate ? { pathLength: 0 } : false}
+        animate={{ pathLength: 1 }}
+        transition={{ duration: 0.22, ease: "easeOut" }}
+      />
+    </svg>
   );
 }
