@@ -91,7 +91,7 @@ main() {
   # Copy next to the old app first; only swap once the copy succeeded, so a
   # failure (disk full, Ctrl-C) never leaves the user without an app.
   local staged="$INSTALL_DIR/.${APP_NAME}.installing"
-  info "Copying to $INSTALL_DIR…"
+  info "Copying to ${INSTALL_DIR}…"
   $sudo rm -rf "$staged"
   $sudo ditto "$mount/$APP_NAME" "$staged" || { $sudo rm -rf "$staged"; fail "Copy failed — your existing install is untouched."; }
   $sudo xattr -dr com.apple.quarantine "$staged" 2>/dev/null || true
