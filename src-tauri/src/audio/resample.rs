@@ -133,7 +133,7 @@ fn design_lowpass(in_rate: u32, out_rate: u32) -> Vec<f32> {
     let fs = f64::from(in_rate);
     let mut n = (5.5 * fs / TRANSITION_HZ).ceil() as usize;
     n = n.clamp(15, MAX_TAPS);
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         n += 1;
     }
     let fc = CUTOFF_FRACTION * f64::from(out_rate) / fs; // cycles per sample

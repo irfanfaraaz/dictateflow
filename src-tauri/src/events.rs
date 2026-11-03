@@ -355,18 +355,16 @@ fn inject_error_payload(err: &InjectError) -> ErrorPayload {
                  Accessibility, then relaunch. ({e})"
             )),
         },
+        // Code and hint come from the inject layer, so the two can't drift.
         InjectError::FocusChanged => payload(
-            "focus_changed",
+            err.code(),
             "Focus changed — transcript copied, press ⌘V to paste",
-            None,
+            err.recovery_hint(),
         ),
         InjectError::AccessibilityDenied => payload(
-            "accessibility_denied",
+            err.code(),
             "Transcript copied — allow Accessibility to auto-paste",
-            Some(
-                "Grant Accessibility in System Settings → Privacy & Security → \
-                 Accessibility, then relaunch. Transcript copied to clipboard.",
-            ),
+            err.recovery_hint(),
         ),
     }
 }
