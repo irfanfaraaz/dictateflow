@@ -1,12 +1,16 @@
-# Checks every push and pull request on a real Apple Silicon Mac:
+# Checks main on a real Apple Silicon Mac:
 # frontend typecheck + tests, then Rust fmt, clippy (warnings are errors,
 # per README) and unit tests.
 name: CI
 
+# Runs only for main (pushes and PRs targeting main). Can also be started
+# by hand from the Actions tab (workflow_dispatch).
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
+    branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
