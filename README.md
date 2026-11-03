@@ -16,10 +16,10 @@ curl -fsSL https://raw.githubusercontent.com/irfanfaraaz/dictateflow/main/script
 
 It downloads the latest `.dmg` from Releases, copies **DictateFlow.app** into `/Applications`, and launches it. Because the file is fetched with `curl` instead of a browser, macOS doesn't attach the quarantine flag, so the unsigned app opens without the "unidentified developer" warning. Run the same command again to update.
 
-Prefer to do it by hand? Same idea, step by step (replace `0.3.0` with the [latest version](https://github.com/irfanfaraaz/dictateflow/releases/latest)):
+Prefer to do it by hand? Same idea, step by step (replace `0.3.1` with the [latest version](https://github.com/irfanfaraaz/dictateflow/releases/latest)):
 
 ```bash
-curl -fL -o /tmp/DictateFlow.dmg https://github.com/irfanfaraaz/dictateflow/releases/download/v0.3.0/DictateFlow_0.3.0_aarch64.dmg
+curl -fL -o /tmp/DictateFlow.dmg https://github.com/irfanfaraaz/dictateflow/releases/download/v0.3.1/DictateFlow_0.3.1_aarch64.dmg
 hdiutil attach /tmp/DictateFlow.dmg -nobrowse -mountpoint /tmp/dictateflow-dmg
 ditto /tmp/dictateflow-dmg/DictateFlow.app /Applications/DictateFlow.app
 hdiutil detach /tmp/dictateflow-dmg && open /Applications/DictateFlow.app
@@ -116,7 +116,7 @@ Logs are written to `~/Library/Logs/dictateflow/dictateflow.log.*`.
 ## Notes
 
 - **Bluetooth earbuds**: Work, but the app correctly handles the HFP profile switch delay. If your earbuds have poor mic quality, use Settings to pick your built-in Mac mic instead.
-- **After rebuilding**: macOS TCC grants are tied to the binary hash. You'll need to re-grant Accessibility permission in System Settings after each rebuild (remove the old entry, relaunch, re-grant).
+- **Permissions surviving updates**: macOS ties Accessibility and Keychain access to the app's code signature. Releases are signed with a stable self-signed certificate (set up once with `scripts/setup-signing.sh`, which stores it as the `MACOS_SIGNING_P12` / `MACOS_SIGNING_P12_PASSWORD` repo secrets), so grants carry over between versions. Without those secrets, builds are ad-hoc signed and you must re-grant Accessibility after every update (remove DictateFlow with −, add it again with +, relaunch). Local `pnpm tauri build` builds are ad-hoc signed too.
 - **Local Whisper engine**: Available but requires downloading a GGML model in Settings → Models. ElevenLabs Scribe is the primary engine.
 
 ## License
