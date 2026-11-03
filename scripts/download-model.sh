@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# Download ggml-small.bin into the wispertype app data dir.
+# Download ggml-small.bin into the DictateFlow app data dir.
+#
+# Prefer Settings → Models in the app (it verifies, resumes and registers the
+# model). This script is a developer convenience; after running it, open
+# Settings → Models once so the app picks the model up.
 #
 # Usage: ./scripts/download-model.sh
 #
@@ -13,10 +17,12 @@ MODEL_ID="ggml-small.bin"
 URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${MODEL_ID}"
 EXPECTED_SHA="1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b"
 
-DEST_DIR="${HOME}/Library/Application Support/com.wispertype.app/models"
+DEST_DIR="${HOME}/Library/Application Support/com.dictateflow.app/models"
 DEST_PATH="${DEST_DIR}/${MODEL_ID}"
 
 mkdir -p "${DEST_DIR}"
+# Never leave a half-written .partial behind on failure / Ctrl-C.
+trap 'rm -f "${DEST_PATH}.partial"' ERR INT TERM
 
 if [[ -f "${DEST_PATH}" ]]; then
   echo "model already exists at: ${DEST_PATH}"

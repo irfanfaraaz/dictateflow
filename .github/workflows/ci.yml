@@ -60,3 +60,25 @@ jobs:
       - name: cargo test
         working-directory: src-tauri
         run: cargo test --all-features
+
+  # Runs the real curl|bash installer on a clean Mac against the latest
+  # published release: JSON parsing, checksum, mount, atomic install, launch.
+  installer-smoke:
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run install.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/install.sh
+      - name: Verify install
+        run: |
+          test -d /Applications/DictateFlow.app
+          plutil -extract CFBundleIdentifier raw /Applications/DictateFlow.app/Contents/Info.plist | grep -qx com.dictateflow.app
+          ! xattr -p com.apple.quarantine /Applications/DictateFlow.app 2>/dev/null
+          echo "installed $(plutil -extract CFBundleShortVersionString raw /Applications/DictateFlow.app/Contents/Info.plist)"
+      - name: Re-run (upgrade path quits the running app and swaps atomically)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/install.sh && test -d /Applications/DictateFlow.app && ! ls -d /Applications/.DictateFlow.app.installing 2>/dev/null
