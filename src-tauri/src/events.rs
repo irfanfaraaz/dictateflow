@@ -363,7 +363,7 @@ fn inject_error_payload(err: &InjectError) -> ErrorPayload {
         ),
         InjectError::AccessibilityDenied => payload(
             err.code(),
-            "Transcript copied — allow Accessibility to auto-paste",
+            "Re-enable Accessibility to paste — text copied",
             err.recovery_hint(),
         ),
     }

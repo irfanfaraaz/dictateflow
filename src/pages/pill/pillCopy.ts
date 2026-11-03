@@ -24,7 +24,7 @@ const BY_CODE: Record<string, PillMessage> = {
   inference: { text: "Transcription failed", tone: "error" },
   transcription_timeout: { text: "Transcription timed out", tone: "error" },
   inject_failed: { text: "Couldn't paste — text is on your clipboard", tone: "notice" },
-  accessibility_denied: { text: "Allow Accessibility to paste — text copied", tone: "notice" },
+  accessibility_denied: { text: "Re-enable Accessibility to paste — text copied", tone: "notice" },
   focus_changed: { text: "Focus changed — text copied, press ⌘V", tone: "notice" },
   start_failed: { text: "Couldn't start dictation", tone: "error" },
   io: { text: "Something went wrong reading files", tone: "error" },
