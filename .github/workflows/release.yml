@@ -1,0 +1,74 @@
+# Build the macOS app and publish a GitHub Release whenever a version tag
+# is pushed:
+#
+#   git tag v0.2.0 && git push origin v0.2.0
+#
+# The curl installer (scripts/install.sh) always installs the newest
+# release, so users get the new build as soon as this finishes.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-macos:
+    # macos-14 = Apple Silicon (arm64) runner → DictateFlow_<ver>_aarch64.dmg
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Frontend checks
+        run: |
+          pnpm exec tsc -b
+          pnpm exec vitest run
+
+      - name: Build app and publish release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: DictateFlow ${{ github.ref_name }}
+          releaseDraft: false
+          prerelease: false
+          releaseBody: |
+            ## Install
+
+            Paste into Terminal (no Gatekeeper prompt):
+
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/irfanfaraaz/dictateflow/main/scripts/install.sh | bash
+            ```
+
+            Or download the `.dmg` below. It's unsigned, so after dragging it to
+            Applications run `xattr -cr /Applications/DictateFlow.app` once.
+
+            Requires macOS on Apple Silicon (M1+).
