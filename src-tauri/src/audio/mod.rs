@@ -6,15 +6,18 @@
 //! cannot allocate, lock, or log without risking dropped frames.
 //!
 //! The contract:
-//! - Output format is **16 kHz mono f32** (whisper.cpp's native input).
-//! - Samples flow through a lock-free `ringbuf::HeapRb<f32>` to async consumers.
-//! - The latest RMS level is published on a `tokio::sync::watch` channel.
+//! - `capture` produces **mono f32 at the device's native rate** into a
+//!   lock-free `ringbuf::HeapRb<f32>`.
+//! - `resample` converts that to **16 kHz** (whisper.cpp's and Scribe's
+//!   input rate) off the RT thread, in the dictation audio pump.
+//! - The peak RMS level is published through a lock-free `level::LevelMeter`.
 //! - The cpal callback never allocates, locks, or logs.
 
-#![allow(dead_code)] // wired into AppState in Task 1.6
+#![allow(dead_code)] // some helpers are only used by tests / later phases
 
 pub mod capture;
 pub mod level;
+pub mod resample;
 pub mod vad;
 
 use thiserror::Error;

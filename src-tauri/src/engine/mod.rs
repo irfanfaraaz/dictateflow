@@ -30,6 +30,7 @@
 pub mod factory;
 pub mod local;
 pub mod scribe;
+pub mod transcript;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -42,9 +43,10 @@ use crate::audio::AudioError;
 /// A chunk of mono f32 PCM samples at a known sample rate.
 ///
 /// The audio capture layer pumps these through an `mpsc::Sender<AudioChunk>`
-/// to whichever engine is active. The `sample_rate` field carries the
-/// effective rate after decimation so engines can tell the remote API the
-/// correct rate (e.g. 8 kHz for Bluetooth HFP mics, 16 kHz for built-in).
+/// to whichever engine is active. The dictation audio pump resamples to
+/// exactly 16 kHz before sending, so `sample_rate` is always 16 000 in the
+/// app; engines still check it (and resample or reject) so a future caller
+/// can't silently feed them the wrong rate.
 #[derive(Debug, Clone)]
 pub struct AudioChunk {
     pub samples: Vec<f32>,
@@ -53,8 +55,9 @@ pub struct AudioChunk {
 
 /// A single transcription result, possibly intermediate.
 ///
-/// Phase 2 only ever emits `is_final = true` (batch mode). Phase 6's streaming
-/// implementation will emit `is_final = false` partials every ~1 s.
+/// `LocalEngine` emits a single `is_final = true` result per session;
+/// `ScribeEngine` also streams `is_final = false` interim text (committed
+/// segments so far + the current partial).
 #[derive(Debug, Clone)]
 pub struct Partial {
     pub text: String,
@@ -91,11 +94,17 @@ pub enum EngineError {
     /// Used by [`scribe::ScribeEngine`].
     #[error("websocket: {0}")]
     WebSocket(String),
+
+    /// Could not reach the remote service at all (DNS, TCP/TLS failure,
+    /// connect timeout) — usually "no internet".
+    #[error("connect: {0}")]
+    Connect(String),
 }
 
 /// Convenience alias used in implementations.
 pub type EngineResult<T> = std::result::Result<T, EngineError>;
 
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Engine: Send + Sync {
     /// Begin a transcription session.

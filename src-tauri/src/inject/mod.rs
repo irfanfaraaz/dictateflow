@@ -24,8 +24,8 @@ pub mod keystroke;
 
 use std::time::Duration;
 
-use tracing::warn;
 use thiserror::Error;
+use tracing::warn;
 
 /// Errors emitted by the inject pipeline.
 ///
