@@ -10,11 +10,23 @@
 //! - Standard macOS user-prompt UX on first access.
 //! - Survives app uninstall/reinstall when the user wants it to.
 //!
+//! # Why secrets are cached in memory
+//!
+//! Every Keychain read by an app that isn't on the item's access list makes
+//! macOS ask for the login keychain password. DictateFlow is ad-hoc signed,
+//! so each new build counts as a different app, and the old code read the
+//! key on every hotkey press: one password prompt per dictation. We now read
+//! each secret at most once per launch and serve later reads from memory
+//! (clicking "Always Allow" on that one prompt silences it for the build).
+//!
 //! # `errSecItemNotFound` (-25300)
 //!
 //! Apple's Security framework treats "no item exists" as an error code
 //! rather than `Ok(None)`. We translate it into idiomatic `Option`/`()`
 //! shapes here so callers can match on real failures.
+
+use std::collections::HashMap;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use security_framework::passwords::{
     delete_generic_password, get_generic_password, set_generic_password,
@@ -39,31 +51,51 @@ pub enum KeychainError {
     InvalidUtf8,
 }
 
+/// Values already read from (or written to) the Keychain this launch.
+/// `None` means "known to be absent". Failed reads (locked keychain, user
+/// clicked Deny) are not cached, so the next use asks again.
+type Cache = HashMap<String, Option<String>>;
+
+fn cache() -> MutexGuard<'static, Cache> {
+    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        // The map is always left consistent, so a poisoned lock is safe.
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Store `value` under `key` (overwrites any existing entry).
 pub fn set(key: &str, value: &str) -> Result<(), KeychainError> {
     set_generic_password(SERVICE, key, value.as_bytes())?;
+    cache().insert(key.to_owned(), Some(value.to_owned()));
     Ok(())
 }
 
 /// Retrieve the secret under `key`, or `Ok(None)` if no entry exists.
+/// Hits the Keychain at most once per launch per key.
 pub fn get(key: &str) -> Result<Option<String>, KeychainError> {
-    match get_generic_password(SERVICE, key) {
-        Ok(bytes) => {
-            let s = String::from_utf8(bytes).map_err(|_| KeychainError::InvalidUtf8)?;
-            Ok(Some(s))
-        }
-        Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(None),
-        Err(e) => Err(KeychainError::SecurityFramework(e)),
+    if let Some(v) = cache().get(key) {
+        return Ok(v.clone());
     }
+    let value = match get_generic_password(SERVICE, key) {
+        Ok(bytes) => Some(String::from_utf8(bytes).map_err(|_| KeychainError::InvalidUtf8)?),
+        Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => None,
+        Err(e) => return Err(KeychainError::SecurityFramework(e)),
+    };
+    cache().insert(key.to_owned(), value.clone());
+    Ok(value)
 }
 
 /// Remove the entry under `key`. Idempotent: missing entries return `Ok(())`.
 pub fn delete(key: &str) -> Result<(), KeychainError> {
     match delete_generic_password(SERVICE, key) {
-        Ok(()) => Ok(()),
-        Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(()),
-        Err(e) => Err(KeychainError::SecurityFramework(e)),
+        Ok(()) => {}
+        Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => {}
+        Err(e) => return Err(KeychainError::SecurityFramework(e)),
     }
+    cache().insert(key.to_owned(), None);
+    Ok(())
 }
 
 /// Convenience: presence-only check (frontend uses this to render
