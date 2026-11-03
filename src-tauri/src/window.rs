@@ -40,6 +40,8 @@ pub const PILL_LABEL: &str = "pill";
 /// clipped.
 pub const PILL_WIDTH: f64 = 320.0;
 /// Height of the pill window in points (matches tauri.conf.json).
+/// Only read by tests (the window's size comes from tauri.conf.json).
+#[cfg_attr(not(test), allow(dead_code))]
 pub const PILL_HEIGHT: f64 = 64.0;
 
 /// Gap between the bottom of the screen's *visible* frame (i.e. above the
@@ -99,7 +101,7 @@ pub fn pill_origin(screens: &[ScreenGeom], mouse: (f64, f64)) -> Option<(f64, f6
 }
 
 /// Borrow the `NSWindow` behind a Tauri window.
-fn ns_window_ref<'a, R: Runtime>(window: &'a WebviewWindow<R>) -> Result<&'a NSWindow> {
+fn ns_window_ref<R: Runtime>(window: &WebviewWindow<R>) -> Result<&NSWindow> {
     let ptr = window
         .ns_window()
         .map_err(|e| anyhow!("ns_window() failed: {e}"))?;
@@ -213,7 +215,7 @@ mod tests {
 
     #[test]
     fn single_screen_centers_above_dock() {
-        let (x, y) = pill_origin(&[laptop()], (100.0, 100.0)).unwrap();
+        let (x, y) = pill_origin(&[laptop()], (100.0, 100.0)).expect("a screen is available");
         assert_eq!(x, ((1512.0 - PILL_WIDTH) / 2.0_f64).round());
         assert_eq!(y, 70.0 + BOTTOM_MARGIN);
     }
@@ -222,7 +224,7 @@ mod tests {
     fn external_monitor_to_the_right_uses_its_origin() {
         // 2560×1440 external to the right; no Dock on it.
         let ext = screen(1512.0, 0.0, 2560.0, 1440.0, 0.0, 25.0);
-        let (x, y) = pill_origin(&[laptop(), ext], (3000.0, 700.0)).unwrap();
+        let (x, y) = pill_origin(&[laptop(), ext], (3000.0, 700.0)).expect("a screen is available");
         assert_eq!(x, 1512.0 + ((2560.0 - PILL_WIDTH) / 2.0_f64).round());
         assert_eq!(y, BOTTOM_MARGIN);
         // Regression: must land inside the external screen, not the laptop.
@@ -232,14 +234,14 @@ mod tests {
     #[test]
     fn external_monitor_to_the_left_has_negative_x() {
         let ext = screen(-1920.0, 0.0, 1920.0, 1080.0, 0.0, 25.0);
-        let (x, _) = pill_origin(&[laptop(), ext], (-500.0, 400.0)).unwrap();
+        let (x, _) = pill_origin(&[laptop(), ext], (-500.0, 400.0)).expect("a screen is available");
         assert!(x < 0.0 && x > -1920.0);
     }
 
     #[test]
     fn external_monitor_above_laptop() {
         let ext = screen(-200.0, 982.0, 1920.0, 1080.0, 0.0, 25.0);
-        let (_, y) = pill_origin(&[laptop(), ext], (500.0, 1500.0)).unwrap();
+        let (_, y) = pill_origin(&[laptop(), ext], (500.0, 1500.0)).expect("a screen is available");
         assert_eq!(y, 982.0 + BOTTOM_MARGIN);
     }
 

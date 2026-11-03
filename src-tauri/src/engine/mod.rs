@@ -96,6 +96,9 @@ pub enum EngineError {
 /// Convenience alias used in implementations.
 pub type EngineResult<T> = std::result::Result<T, EngineError>;
 
+// async_trait adds #[must_use] to methods returning a boxed future, which
+// newer clippy flags as double_must_use.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Engine: Send + Sync {
     /// Begin a transcription session.

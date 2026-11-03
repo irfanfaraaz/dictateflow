@@ -47,17 +47,12 @@ pub struct ScribeSettings {
     pub streaming: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HotkeyMode {
+    #[default]
     Hold,
     Toggle,
-}
-
-impl Default for HotkeyMode {
-    fn default() -> Self {
-        Self::Hold
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
