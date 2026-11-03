@@ -260,6 +260,7 @@ impl DictationController {
             }
             Err(e) => {
                 warn!(?e, "start_dictation failed");
+                crate::events::flash_start_error(&app, &e);
             }
         }
     }

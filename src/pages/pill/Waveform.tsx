@@ -1,5 +1,5 @@
-import { useEffect, useRef } from "react";
-import { barTargets, normalizeLevel, processingTargets, smoothLevel } from "./levelMath";
+import { useEffect, useRef, type MutableRefObject } from "react";
+import { barTargets, ease, normalizeLevel, processingTargets, smoothLevel } from "./levelMath";
 
 export type WaveMode = "listening" | "processing" | "error";
 
@@ -8,8 +8,10 @@ const BAR_WIDTH = 3;
 const BAR_GAP = 3;
 const MIN_BAR_HEIGHT = 3;
 const MAX_BAR_HEIGHT = 22;
-/** Per-frame easing of each bar toward its target height. */
+/** Fraction of the gap each bar closes per 60 Hz frame (time-corrected). */
 const BAR_EASING = 0.35;
+/** Clamp dt so a stalled frame (window just shown) doesn't teleport bars. */
+const MAX_DT_MS = 64;
 
 // Hex (not oklch CSS vars): canvas fillStyle silently ignores colors it
 // can't parse and falls back to black — invisible on the dark pill.
@@ -22,67 +24,81 @@ const COLORS: Record<WaveMode, string> = {
 export const WAVEFORM_WIDTH = BAR_COUNT * BAR_WIDTH + (BAR_COUNT - 1) * BAR_GAP;
 
 interface WaveformProps {
-  /** Raw RMS amplitude from Rust (unnormalized). */
-  level: number;
+  /** Latest raw RMS from Rust. A ref, not a prop, so 30 Hz level events
+   *  never trigger React re-renders — the rAF loop just reads it. */
+  levelRef: MutableRefObject<number>;
   mode: WaveMode;
-  /** When true, bars still track the voice level but without decorative wobble. */
+  /** False once the pill has faded out — pauses the rAF loop. */
+  active: boolean;
+  /** Bars still track the voice level, but without decorative wobble. */
   reducedMotion?: boolean;
+  /** Called every frame with the smoothed 0..1 envelope (drives the rec dot). */
+  onFrame?: (envelope: number) => void;
 }
 
-export function Waveform({ level, mode, reducedMotion = false }: WaveformProps) {
+export function Waveform({ levelRef, mode, active, reducedMotion = false, onFrame }: WaveformProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const levelRef = useRef(level);
   const modeRef = useRef(mode);
   const reducedRef = useRef(reducedMotion);
+  const onFrameRef = useRef(onFrame);
+  modeRef.current = mode;
+  reducedRef.current = reducedMotion;
+  onFrameRef.current = onFrame;
 
-  useEffect(() => { levelRef.current = level; }, [level]);
-  useEffect(() => { modeRef.current = mode; }, [mode]);
-  useEffect(() => { reducedRef.current = reducedMotion; }, [reducedMotion]);
-
+  // Canvas sizing is done once; it survives pause/resume of the loop.
   useEffect(() => {
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext("2d");
     if (!canvas || !ctx) return;
-
     const dpr = window.devicePixelRatio || 1;
-    const width = WAVEFORM_WIDTH;
-    const height = MAX_BAR_HEIGHT;
-    canvas.width = Math.round(width * dpr);
-    canvas.height = Math.round(height * dpr);
-    canvas.style.width = `${width}px`;
-    canvas.style.height = `${height}px`;
+    canvas.width = Math.round(WAVEFORM_WIDTH * dpr);
+    canvas.height = Math.round(MAX_BAR_HEIGHT * dpr);
+    canvas.style.width = `${WAVEFORM_WIDTH}px`;
+    canvas.style.height = `${MAX_BAR_HEIGHT}px`;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }, []);
 
+  useEffect(() => {
+    if (!active) return;
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    if (!canvas || !ctx) return;
+
+    // Fresh state per session: bars start at rest, no stale frame.
     const heights = new Float32Array(BAR_COUNT).fill(MIN_BAR_HEIGHT);
     let envelope = 0;
+    let last = performance.now();
     let raf = 0;
 
     const tick = (now: number) => {
+      const dt = Math.min(MAX_DT_MS, Math.max(0, now - last));
+      last = now;
       const m = modeRef.current;
-      const t = reducedRef.current ? 0 : now;
+      const reduced = reducedRef.current;
 
       let targets: number[];
       if (m === "listening") {
-        envelope = smoothLevel(envelope, normalizeLevel(levelRef.current));
-        targets = barTargets(envelope, t, BAR_COUNT);
-      } else if (m === "processing") {
-        envelope = 0;
-        targets = reducedRef.current
-          ? new Array<number>(BAR_COUNT).fill(0.15)
-          : processingTargets(now, BAR_COUNT);
+        envelope = smoothLevel(envelope, normalizeLevel(levelRef.current), dt);
+        targets = barTargets(envelope, reduced ? 0 : now, BAR_COUNT);
       } else {
-        envelope = 0;
-        targets = new Array<number>(BAR_COUNT).fill(0);
+        envelope = smoothLevel(envelope, 0, dt);
+        targets =
+          m === "processing"
+            ? reduced
+              ? new Array<number>(BAR_COUNT).fill(0.15)
+              : processingTargets(now, BAR_COUNT)
+            : new Array<number>(BAR_COUNT).fill(0);
       }
+      onFrameRef.current?.(envelope);
 
-      ctx.clearRect(0, 0, width, height);
+      ctx.clearRect(0, 0, WAVEFORM_WIDTH, MAX_BAR_HEIGHT);
       ctx.fillStyle = COLORS[m];
       for (let i = 0; i < BAR_COUNT; i += 1) {
         const target = MIN_BAR_HEIGHT + targets[i] * (MAX_BAR_HEIGHT - MIN_BAR_HEIGHT);
-        heights[i] += (target - heights[i]) * BAR_EASING;
+        heights[i] = ease(heights[i], target, BAR_EASING, dt);
         const h = Math.max(MIN_BAR_HEIGHT, heights[i]);
         const x = i * (BAR_WIDTH + BAR_GAP);
-        const y = (height - h) / 2;
+        const y = (MAX_BAR_HEIGHT - h) / 2;
         ctx.beginPath();
         ctx.roundRect(x, y, BAR_WIDTH, h, BAR_WIDTH / 2);
         ctx.fill();
@@ -92,7 +108,7 @@ export function Waveform({ level, mode, reducedMotion = false }: WaveformProps) 
 
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, []);
+  }, [active, levelRef]);
 
   return <canvas ref={canvasRef} aria-hidden="true" />;
 }

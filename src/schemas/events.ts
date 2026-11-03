@@ -15,6 +15,10 @@ export type DictationStart = z.infer<typeof dictationStartSchema>;
 export const dictationStopSchema = z.object({}).passthrough().nullable().optional();
 export type DictationStop = z.infer<typeof dictationStopSchema>;
 
+/** Dictation fully finished — pill should fade out (window hides ~250 ms later). */
+export const dictationEndSchema = z.object({}).passthrough().nullable().optional();
+export type DictationEnd = z.infer<typeof dictationEndSchema>;
+
 export const capReachedSchema = z.object({
   cap_seconds: z.number().int().nonnegative(),
 });
@@ -50,6 +54,7 @@ export const EVENT = {
   start: "dictation:start",
   audioLevel: "dictation:audio_level",
   stop: "dictation:stop",
+  end: "dictation:end",
   injected: "dictation:injected",
   error: "dictation:error",
   final: "dictation:final",

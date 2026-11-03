@@ -21,12 +21,25 @@ export function normalizeLevel(rms: number): number {
   return Math.max(0, Math.min(1, t));
 }
 
-/** Fast attack / slow release envelope — like a VU meter. Call once per frame. */
+const FRAME_60 = 1000 / 60;
+
+/**
+ * Frame-rate-independent exponential ease toward `target`.
+ * `k60` is the fraction of the gap closed per 60 Hz frame; for any `dtMs`
+ * the result equals applying that per-frame step `dtMs / 16.67` times, so
+ * motion feels identical on 60 Hz and 120 Hz (ProMotion) displays.
+ */
+export function ease(prev: number, target: number, k60: number, dtMs: number): number {
+  if (dtMs <= 0) return prev;
+  const k = 1 - Math.pow(1 - k60, dtMs / FRAME_60);
+  return prev + (target - prev) * k;
+}
+
+/** Fast attack / slow release envelope — like a VU meter. */
 const ATTACK = 0.55;
 const RELEASE = 0.12;
-export function smoothLevel(prev: number, target: number): number {
-  const k = target > prev ? ATTACK : RELEASE;
-  return prev + (target - prev) * k;
+export function smoothLevel(prev: number, target: number, dtMs: number = FRAME_60): number {
+  return ease(prev, target, target > prev ? ATTACK : RELEASE, dtMs);
 }
 
 /** Resting height (fraction of max) and the gentle "breathing" on top of it. */
