@@ -77,9 +77,33 @@ pub fn find(id: &str) -> Option<&'static ModelEntry> {
     ALL.iter().find(|m| m.id == id)
 }
 
+/// Pick the highest-quality catalog model among `installed`, if any.
+///
+/// "Quality" follows catalog display order (tiny → large-v3-turbo), so the
+/// last catalog entry that is installed wins. Ids not in the catalog are
+/// ignored.
+pub fn best_installed(installed: &[String]) -> Option<&'static str> {
+    ALL.iter()
+        .rev()
+        .find(|m| installed.iter().any(|i| i == m.id))
+        .map(|m| m.id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn best_installed_prefers_largest() {
+        let installed = [
+            "tiny".to_string(),
+            "medium".to_string(),
+            "bogus".to_string(),
+        ];
+        assert_eq!(best_installed(&installed), Some("medium"));
+        assert_eq!(best_installed(&["bogus".to_string()]), None);
+        assert_eq!(best_installed(&[]), None);
+    }
 
     #[test]
     fn small_entry_well_formed() {

@@ -71,7 +71,16 @@ pub fn run() {
 
     info!("dictateflow starting");
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
+        // MUST be the first plugin: a second launch exits before any other
+        // plugin (store, global shortcut, tray) initializes, so we never get
+        // a duplicate tray icon, a failed hotkey registration, or two
+        // processes writing settings.json. The running instance surfaces its
+        // settings window instead.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            info!("second launch detected — focusing settings window");
+            tray::show_settings_window(app);
+        }))
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(AppState::new())
@@ -109,10 +118,28 @@ pub fn run() {
                 }
             }
 
-            let settings = app
-                .get_webview_window("settings")
-                .expect("settings window must exist");
-            settings.show().expect("show settings window");
+            // The stored `has_api_key` flag is only a hint; the Keychain is
+            // the source of truth (the item may have been removed in
+            // Keychain Access, or settings.json restored from a backup).
+            reconcile_api_key_flag(app.handle());
+
+            // Start quietly in the tray once the app is set up; only open
+            // the settings window on first run or when dictation can't work
+            // yet (no API key / no installed model for the active engine).
+            let show_settings = startup_needs_settings(app.handle());
+            if show_settings {
+                tray::show_settings_window(app.handle());
+            } else {
+                info!("setup complete — starting in the menu bar");
+            }
+
+            // Drop `.partial` downloads that can never be resumed. Partials
+            // for catalog models are kept so the next download resumes.
+            if let Some(dir) = models::models_dir(app.handle()) {
+                tauri::async_runtime::spawn(async move {
+                    models::download::cleanup_orphan_partials(&dir).await;
+                });
+            }
 
             // Register the configured hotkey (falls back to F5 on parse/OS
             // failure). Requires Input Monitoring permission on macOS; we log
@@ -133,6 +160,85 @@ pub fn run() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .on_window_event(|window, event| {
+            // Closing the settings window hides it instead of destroying it,
+            // so the tray's "Open Settings" (and a second launch) can always
+            // bring it back.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "settings" {
+                    api.prevent_close();
+                    if let Err(e) = window.hide() {
+                        warn!(?e, "hide settings window failed");
+                    }
+                }
+            }
+        })
+        .build(tauri::generate_context!());
+
+    let app = match app {
+        Ok(app) => app,
+        Err(e) => {
+            error!(?e, "failed to start DictateFlow");
+            std::process::exit(1);
+        }
+    };
+
+    app.run(|_app, _event| {
+        // Clicking the Dock icon while no window is visible reopens settings.
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Reopen {
+            has_visible_windows: false,
+            ..
+        } = _event
+        {
+            tray::show_settings_window(_app);
+        }
+    });
+}
+
+/// Make `settings.scribe.has_api_key` match the Keychain.
+fn reconcile_api_key_flag<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    let has_key = match keychain::has(keychain::ELEVENLABS_KEY) {
+        Ok(v) => v,
+        Err(e) => {
+            // Keychain unavailable (locked, denied): keep the stored flag
+            // rather than guessing.
+            warn!(?e, "keychain check failed — keeping stored has_api_key");
+            return;
+        }
+    };
+    let Some(store) = app.try_state::<settings::SettingsStore>() else {
+        return;
+    };
+    if store.get().scribe.has_api_key == has_key {
+        return;
+    }
+    info!(has_key, "reconciling has_api_key with keychain");
+    if let Err(e) = store.update_with(app, |s| s.scribe.has_api_key = has_key) {
+        warn!(?e, "persist reconciled has_api_key failed");
+    }
+}
+
+/// Decide whether the settings window should open at launch. Also marks
+/// `first_run_completed` once a usable engine is configured, so subsequent
+/// launches start quietly in the tray.
+fn startup_needs_settings<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let Some(store) = app.try_state::<settings::SettingsStore>() else {
+        return true;
+    };
+    let s = store.get();
+    let usable = match s.engine {
+        settings::schema::EngineKind::Local => models::resolve_path(app, &s.local.model).is_ok(),
+        settings::schema::EngineKind::Scribe => s.scribe.has_api_key,
+    };
+
+    if usable && !s.first_run_completed {
+        // Show it this one time (first run), but remember setup is done.
+        if let Err(e) = store.update_with(app, |s| s.first_run_completed = true) {
+            warn!(?e, "persist first_run_completed failed");
+        }
+        return true;
+    }
+
+    !usable || !s.first_run_completed
 }

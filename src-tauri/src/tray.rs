@@ -143,9 +143,21 @@ fn load_icon<R: Runtime>(app: &AppHandle<R>, state: TrayState) -> Image<'static>
     Image::new_owned(vec![0, 0, 0, 0], 1, 1)
 }
 
-fn show_settings_window<R: Runtime>(app: &AppHandle<R>) {
-    if let Some(win) = app.get_webview_window("settings") {
-        let _ = win.show();
-        let _ = win.set_focus();
+/// Show + focus the settings window (tray menu, tray click, Dock reopen,
+/// second launch, first-run onboarding).
+pub fn show_settings_window<R: Runtime>(app: &AppHandle<R>) {
+    match app.get_webview_window("settings") {
+        Some(win) => {
+            if let Err(e) = win.show() {
+                warn!(?e, "show settings window failed");
+            }
+            if let Err(e) = win.unminimize() {
+                debug!(?e, "unminimize settings window failed");
+            }
+            if let Err(e) = win.set_focus() {
+                debug!(?e, "focus settings window failed");
+            }
+        }
+        None => warn!("settings window missing"),
     }
 }
