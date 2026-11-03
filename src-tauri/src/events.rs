@@ -393,8 +393,9 @@ pub async fn start_dictation<R: Runtime>(app: &AppHandle<R>) -> Result<Dictation
                             // and let the pill fade quietly.
                             info!("skipping injection: empty transcript");
                         } else {
-                            match inject::paste(&p.text).await {
-                                Ok(()) => {
+                            // TODO(integrator): pass the pid captured at dictation start.
+                            match inject::paste(&p.text, None).await {
+                                Ok(outcome) => {
                                     // Play stop sound on successful injection.
                                     {
                                         let store = app_for_engine.try_state::<SettingsStore>();
@@ -410,7 +411,7 @@ pub async fn start_dictation<R: Runtime>(app: &AppHandle<R>) -> Result<Dictation
                                         EV_DICTATION_INJECTED,
                                         InjectedPayload {
                                             text: p.text,
-                                            restored_clipboard: true,
+                                            restored_clipboard: outcome.restored_clipboard,
                                         },
                                     ) {
                                         warn!(?e, "emit dictation:injected failed");
@@ -424,13 +425,9 @@ pub async fn start_dictation<R: Runtime>(app: &AppHandle<R>) -> Result<Dictation
                                         warn!(?te, "tray set_state Error (inject fail) failed");
                                     }
                                     let payload = ErrorPayload {
-                                        code: "inject_failed",
+                                        code: e.code(),
                                         message: e.to_string(),
-                                        recovery_hint: Some(
-                                            "Grant Accessibility permission in System \
-                                             Settings → Privacy & Security → Accessibility."
-                                                .into(),
-                                        ),
+                                        recovery_hint: e.recovery_hint().map(Into::into),
                                     };
                                     if let Err(e2) =
                                         app_for_engine.emit(EV_DICTATION_ERROR, payload)
