@@ -6,9 +6,30 @@ Press a hotkey, talk, release. Your speech is transcribed via ElevenLabs Scribe 
 
 ## Download
 
-Grab the latest `.dmg` from [**Releases**](https://github.com/irfanfaraaz/dictateflow/releases).
+### Recommended: one-line install (no Gatekeeper prompt)
 
-> **macOS Gatekeeper warning** — DictateFlow is not yet code-signed, so macOS will block it on first launch. To open it:
+Paste this into Terminal:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/irfanfaraaz/dictateflow/main/scripts/install.sh | bash
+```
+
+It downloads the latest `.dmg` from Releases, copies **DictateFlow.app** into `/Applications`, and launches it. Because the file is fetched with `curl` instead of a browser, macOS doesn't attach the quarantine flag, so the unsigned app opens without the "unidentified developer" warning. Run the same command again to update.
+
+Prefer to do it by hand? Same idea, step by step:
+
+```bash
+curl -fL -o /tmp/DictateFlow.dmg https://github.com/irfanfaraaz/dictateflow/releases/download/v0.1.0/DictateFlow_0.1.0_aarch64.dmg
+hdiutil attach /tmp/DictateFlow.dmg -nobrowse -mountpoint /tmp/dictateflow-dmg
+ditto /tmp/dictateflow-dmg/DictateFlow.app /Applications/DictateFlow.app
+hdiutil detach /tmp/dictateflow-dmg && open /Applications/DictateFlow.app
+```
+
+### Browser download
+
+Or grab the latest `.dmg` from [**Releases**](https://github.com/irfanfaraaz/dictateflow/releases).
+
+> **macOS Gatekeeper warning** — DictateFlow is not yet code-signed, so macOS will block it on first launch when downloaded through a browser. To open it:
 >
 > 1. Open the `.dmg` and drag DictateFlow to Applications
 > 2. Open Terminal and run:
