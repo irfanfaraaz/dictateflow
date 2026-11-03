@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { chordFromEvent } from "../hotkeyChord";
 import { DefinitionList, DossierCard } from "../components";
 import { useSettingsContext } from "../SettingsContext";
 import type { HotkeyMode } from "@/schemas/settings";
@@ -29,21 +30,11 @@ export function Hotkey(): JSX.Element {
         setCapturing(false);
         return;
       }
-      // Ignore plain modifier-only keydowns; wait for the actual chord.
-      if (e.key === "Meta" || e.key === "Shift" || e.key === "Alt" || e.key === "Control") {
-        return;
-      }
+      // Physical-key chord (see hotkeyChord.ts); null for modifier-only
+      // keydowns — keep waiting for the actual chord.
+      const binding = chordFromEvent(e);
+      if (!binding) return;
       e.preventDefault();
-      const parts: string[] = [];
-      if (e.metaKey) parts.push("Cmd");
-      if (e.ctrlKey) parts.push("Ctrl");
-      if (e.altKey) parts.push("Alt");
-      if (e.shiftKey) parts.push("Shift");
-      // Function keys come through as `F1`..`F19`; otherwise uppercase so
-      // `a` and `A` collapse onto one binding string.
-      const key = /^F\d{1,2}$/.test(e.key) ? e.key : e.key.toUpperCase();
-      parts.push(key);
-      const binding = parts.join("+");
 
       setCapturing(false);
       setBindError(null);
@@ -70,7 +61,9 @@ export function Hotkey(): JSX.Element {
 
   function setMode(mode: HotkeyMode) {
     if (settings.hotkey.mode === mode) return;
-    void update({ hotkey: { mode } });
+    update({ hotkey: { mode } }).catch((err: unknown) => {
+      setBindError(err instanceof Error ? err.message : String(err));
+    });
   }
 
   return (

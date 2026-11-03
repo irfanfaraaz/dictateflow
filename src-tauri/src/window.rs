@@ -35,9 +35,10 @@ use tracing::{debug, warn};
 pub const PILL_LABEL: &str = "pill";
 
 /// Width of the pill window in points (matches tauri.conf.json).
-/// Larger than the visible pill (~100×38) so its shadow and spring-in
-/// overshoot are never clipped by the window bounds.
-pub const PILL_WIDTH: f64 = 160.0;
+/// Larger than the visible pill (~100×38, up to 300 wide with a message)
+/// so its shadow, spring-in overshoot and widened message state are never
+/// clipped.
+pub const PILL_WIDTH: f64 = 320.0;
 /// Height of the pill window in points (matches tauri.conf.json).
 pub const PILL_HEIGHT: f64 = 64.0;
 

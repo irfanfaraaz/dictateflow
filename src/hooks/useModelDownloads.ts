@@ -150,6 +150,8 @@ export function useModelDownloads(): UseModelDownloads {
         delete next[id];
         return next;
       });
+      // A user-initiated cancel is a reset, not an error.
+      if (message === "cancelled") return;
       setErrors((prev) => ({ ...prev, [id]: message }));
     })
       .then((un) => {
@@ -180,9 +182,17 @@ export function useModelDownloads(): UseModelDownloads {
   }, []);
 
   const cancel = useCallback((id: string) => {
-    cancelModelDownload(id).catch((err) =>
-      console.error("[useModelDownloads] cancel failed", err),
-    );
+    cancelModelDownload(id)
+      .then(() => {
+        // Clear the progress bar right away rather than waiting for an
+        // event (older backends emitted nothing on cancel, freezing it).
+        setProgress((prev) => {
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
+      })
+      .catch((err) => console.error("[useModelDownloads] cancel failed", err));
   }, []);
 
   const remove = useCallback(

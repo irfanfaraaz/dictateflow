@@ -31,3 +31,6 @@ src-tauri/WixTools/
 # at runtime (Phase 5).
 *.bin
 src-tauri/resources/*.bin
+
+# Local agent/editor tooling
+.claude/

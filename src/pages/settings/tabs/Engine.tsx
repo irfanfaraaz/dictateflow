@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { DefinitionList, DossierCard } from "../components";
+import { DefinitionList, DossierCard, SaveError, useSaveError } from "../components";
 import { useSettingsContext } from "../SettingsContext";
 import { setApiKey, clearApiKey, listInputDevices, type InputDeviceInfo } from "@/ipc/commands";
 import { useModelDownloads } from "@/hooks/useModelDownloads";
@@ -57,9 +57,11 @@ function InputDevicePicker(): JSX.Element {
             aria-label="input audio device"
             value={selectedId}
             onChange={(e) =>
-              void update({
+              update({
                 audio: { input_device_id: e.target.value || null },
-              })
+              }).catch((err: unknown) =>
+                setError(`couldn't save — ${err instanceof Error ? err.message : String(err)}`),
+              )
             }
             disabled={loading}
             className="flex-1 bg-transparent border-b border-rule font-mono text-sm text-text focus:border-accent outline-none cursor-pointer disabled:opacity-50"
@@ -212,9 +214,22 @@ export function Engine(): JSX.Element {
   const isScribe = settings.engine === "scribe";
   const localRef = useRef<HTMLButtonElement | null>(null);
   const scribeRef = useRef<HTMLButtonElement | null>(null);
+  const { error: saveError, guard } = useSaveError();
+
+  // Keep the active model pointing at something that's installed. The
+  // default is "small"; with only "tiny" installed the <select> *displayed*
+  // tiny while dictation kept trying (and failing) to load small — and
+  // re-picking tiny fired no onChange.
+  const activeModel = settings.local.model;
+  const firstInstalled = installed[0];
+  useEffect(() => {
+    if (firstInstalled && !installed.includes(activeModel)) {
+      guard(update({ local: { model: firstInstalled } }));
+    }
+  }, [activeModel, firstInstalled, installed, guard, update]);
 
   function roveTo(target: EngineKind) {
-    void update({ engine: target });
+    guard(update({ engine: target }));
     // Move focus too, so the radio that owns tabindex=0 also has the
     // visible focus ring. Defer one tick so React paints the new
     // tabindex before we focus.
@@ -238,12 +253,13 @@ export function Engine(): JSX.Element {
   return (
     <div role="radiogroup" aria-label="transcription engine" className="space-y-6">
       <InputDevicePicker />
+      <SaveError error={saveError} />
       <DossierCard
         ref={localRef}
         header="local / on-device / private"
         active={isLocal}
         onActivate={() => {
-          if (!isLocal) void update({ engine: "local" });
+          if (!isLocal) guard(update({ engine: "local" }));
         }}
         onArrowNav={onArrow("local")}
         radioGroup={{ name: "engine" }}
@@ -266,7 +282,7 @@ export function Engine(): JSX.Element {
                     aria-label="active whisper model"
                     value={settings.local.model}
                     onChange={(e) =>
-                      void update({ local: { model: e.target.value } })
+                      guard(update({ local: { model: e.target.value } }))
                     }
                     className="bg-transparent border-b border-rule font-mono text-sm text-text focus:border-accent outline-none cursor-pointer"
                   >
@@ -290,7 +306,7 @@ export function Engine(): JSX.Element {
         header="scribe v2 / cloud / 150ms latency / byok"
         active={isScribe}
         onActivate={() => {
-          if (!isScribe) void update({ engine: "scribe" });
+          if (!isScribe) guard(update({ engine: "scribe" }));
         }}
         onArrowNav={onArrow("scribe")}
         radioGroup={{ name: "engine" }}
