@@ -94,8 +94,20 @@ pub fn request_accessibility() -> bool {
     let value = CFBoolean::true_value();
     let pairs: Vec<(CFString, CFBoolean)> = vec![(key, value)];
     let opts = CFDictionary::from_CFType_pairs(&pairs);
+    // SAFETY: `opts` is a live CFDictionary for the duration of the call;
+    // AX only reads it and does not retain beyond the call.
     (unsafe { AXIsProcessTrustedWithOptions(opts.as_concrete_TypeRef() as *const _) }) != 0
 }
+
+/// Recovery guidance when Accessibility is not trusted.
+///
+/// Unsigned / ad-hoc-signed builds get a new code signature on every
+/// update, so System Settings can show the toggle ON while
+/// `AXIsProcessTrusted` is false for the new binary. Removing and
+/// re-adding the entry is the only fix.
+pub const ACCESSIBILITY_RECOVERY_HINT: &str = "Accessibility permission is off for this build. \
+In System Settings → Privacy & Security → Accessibility, remove DictateFlow (−), \
+add it again (+), then relaunch.";
 
 // ----------------------------------------------------------------------
 // Input Monitoring — `IOHIDCheckAccess` from IOKit.
@@ -129,39 +141,55 @@ pub fn check_input_monitoring() -> PermissionState {
 }
 
 // ----------------------------------------------------------------------
-// Microphone — pragmatic probe via cpal device enumeration.
+// Microphone — `AVCaptureDevice.authorizationStatusForMediaType:`.
 // ----------------------------------------------------------------------
 
-/// Pragmatic probe: `AVCaptureDevice.authorizationStatusForMediaType:` is
-/// the real call but pulling AVFoundation through objc2 + msg_send! adds
-/// noticeable build complexity for a check we already perform implicitly
-/// on first dictation. Instead we ask cpal whether a default input device
-/// is reachable; if it is, the OS has at least authorized us to enumerate
-/// (mic-denied apps see `Err(NoDevice)` from cpal). False negatives are
-/// possible in unusual configurations (multiple audio backends, virtual
-/// devices). Phase 9 polish revisits with the AV Foundation call.
-pub fn check_microphone() -> PermissionState {
-    use cpal::traits::{DeviceTrait, HostTrait};
+#[link(name = "AVFoundation", kind = "framework")]
+#[allow(non_upper_case_globals)] // Apple symbol names
+extern "C" {
+    /// `AVMediaTypeAudio` (an `AVMediaType`, i.e. `NSString *`).
+    static AVMediaTypeAudio: &'static objc2_foundation::NSString;
+}
 
-    let host = cpal::default_host();
-    match host.default_input_device() {
-        Some(dev) => {
-            // Querying `default_input_config` exercises one more layer of
-            // permission — some macs return a device handle but fail on
-            // config when TCC blocks the actual stream.
-            match dev.default_input_config() {
-                Ok(_) => PermissionState::Granted,
-                Err(e) => {
-                    warn!(
-                        ?e,
-                        "mic default_input_config failed; reporting NotRequested"
-                    );
-                    PermissionState::NotRequested
-                }
-            }
-        }
-        None => PermissionState::NotRequested,
+/// Map `AVAuthorizationStatus` to our tri-state.
+///
+/// 0 NotDetermined → `NotRequested` (the system will prompt the first
+/// time cpal opens the input stream), 1 Restricted / 2 Denied → `Denied`,
+/// 3 Authorized → `Granted`. Unknown future values are treated as
+/// `NotRequested` so the UI keeps offering the settings CTA.
+pub fn map_av_authorization_status(status: isize) -> PermissionState {
+    match status {
+        3 => PermissionState::Granted,
+        1 | 2 => PermissionState::Denied,
+        _ => PermissionState::NotRequested,
     }
+}
+
+/// Real TCC probe for the microphone.
+///
+/// Enumerating CoreAudio devices (the previous approach) succeeds even
+/// when TCC denies capture, so it reported `Granted` for denied apps.
+/// `AVCaptureDevice` asks TCC directly.
+///
+/// We don't request access programmatically here: that needs an ObjC
+/// block (`requestAccessForMediaType:completionHandler:`) and `block2`
+/// is not a direct dependency. Opening the input stream via cpal on the
+/// first dictation triggers the same system prompt.
+pub fn check_microphone() -> PermissionState {
+    use objc2::msg_send;
+    use objc2::runtime::AnyClass;
+
+    let Some(cls) = AnyClass::get("AVCaptureDevice") else {
+        warn!("AVCaptureDevice class not found; reporting NotRequested");
+        return PermissionState::NotRequested;
+    };
+    // SAFETY: `authorizationStatusForMediaType:` is a class method taking
+    // an `AVMediaType` (NSString) and returning `AVAuthorizationStatus`
+    // (NSInteger). `AVMediaTypeAudio` is a framework-provided constant
+    // that lives for the whole process.
+    let status: isize =
+        unsafe { msg_send![cls, authorizationStatusForMediaType: AVMediaTypeAudio] };
+    map_av_authorization_status(status)
 }
 
 // ----------------------------------------------------------------------
@@ -213,6 +241,28 @@ pub fn open_system_settings(kind: PermissionKind) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn av_status_maps_to_permission_state() {
+        assert_eq!(
+            map_av_authorization_status(0),
+            PermissionState::NotRequested
+        );
+        assert_eq!(map_av_authorization_status(1), PermissionState::Denied);
+        assert_eq!(map_av_authorization_status(2), PermissionState::Denied);
+        assert_eq!(map_av_authorization_status(3), PermissionState::Granted);
+        assert_eq!(
+            map_av_authorization_status(99),
+            PermissionState::NotRequested
+        );
+    }
+
+    #[test]
+    fn accessibility_hint_has_reset_steps() {
+        assert!(ACCESSIBILITY_RECOVERY_HINT
+            .starts_with("Accessibility permission is off for this build. In System Settings"));
+        assert!(ACCESSIBILITY_RECOVERY_HINT.ends_with("add it again (+), then relaunch."));
+    }
 
     #[test]
     fn permission_state_serializes_snake_case() {
