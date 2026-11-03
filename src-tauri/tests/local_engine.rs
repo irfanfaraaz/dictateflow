@@ -23,18 +23,19 @@
 
 use std::path::PathBuf;
 
+use dictateflow_lib::__test_only::{AudioChunk, Engine, LocalEngine};
 use futures::StreamExt;
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use dictateflow_lib::__test_only::{AudioChunk, Engine, LocalEngine};
 
 const JFK_WAV: &[u8] = include_bytes!("fixtures/jfk.wav");
 const JFK_WAV_SHA256: &str = "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e";
 
 fn dev_model_path() -> PathBuf {
     let home = std::env::var_os("HOME").expect("HOME must be set");
-    PathBuf::from(home).join("Library/Application Support/com.dictateflow.app/models/ggml-small.bin")
+    PathBuf::from(home)
+        .join("Library/Application Support/com.dictateflow.app/models/ggml-small.bin")
 }
 
 /// Decode 16-bit PCM mono @ 16 kHz from the fixture WAV into f32 in [-1, 1].
@@ -169,7 +170,12 @@ async fn local_engine_transcribes_jfk() {
     // Feed the entire fixture as one chunk; the batch engine will accumulate
     // it, see the sender drop, and run a single inference.
     let samples = decode_jfk_samples();
-    tx.send(AudioChunk { samples, sample_rate: 16_000 }).await.expect("send chunk");
+    tx.send(AudioChunk {
+        samples,
+        sample_rate: 16_000,
+    })
+    .await
+    .expect("send chunk");
     drop(tx);
 
     let mut stream = engine.stream(rx, cancel).await.expect("engine.stream");
