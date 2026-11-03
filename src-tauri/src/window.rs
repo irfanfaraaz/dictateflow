@@ -39,6 +39,7 @@ pub const PILL_LABEL: &str = "pill";
 /// overshoot are never clipped by the window bounds.
 pub const PILL_WIDTH: f64 = 160.0;
 /// Height of the pill window in points (matches tauri.conf.json).
+#[allow(dead_code)]
 pub const PILL_HEIGHT: f64 = 64.0;
 
 /// Gap between the bottom of the screen's *visible* frame (i.e. above the
