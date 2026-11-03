@@ -10,13 +10,19 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Manual run: Actions → Release → Run workflow, enter e.g. v0.2.0.
+  # The release (and its tag, if missing) is created on the selected commit.
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create, e.g. v0.2.0"
+        required: true
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -55,8 +61,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: DictateFlow ${{ github.ref_name }}
+          tagName: ${{ inputs.tag || github.ref_name }}
+          releaseName: DictateFlow ${{ inputs.tag || github.ref_name }}
+          releaseCommitish: ${{ github.sha }}
           releaseDraft: false
           prerelease: false
           releaseBody: |
