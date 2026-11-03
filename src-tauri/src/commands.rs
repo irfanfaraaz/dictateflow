@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use tokio_util::sync::CancellationToken;
 
@@ -73,7 +73,14 @@ pub async fn update_settings<R: Runtime>(
         }
     }
 
+    let invalidates_engine = patch_invalidates_engine(&patch);
     let next = store.update_patch(&app, patch).context("update settings")?;
+
+    // Engine kind, local model selection or language changed → drop the
+    // cached engine so the next dictation builds one from the new settings.
+    if invalidates_engine {
+        clear_engine_cache(&app);
+    }
 
     // Emit AFTER the store mutation so listeners on other windows can rely
     // on the snapshot reflecting disk state. Failures here are non-fatal —
@@ -83,6 +90,27 @@ pub async fn update_settings<R: Runtime>(
     }
 
     Ok(next)
+}
+
+/// Top-level settings keys whose change requires rebuilding the engine.
+const ENGINE_AFFECTING_KEYS: &[&str] = &["engine", "local", "language"];
+
+fn patch_invalidates_engine(patch: &Value) -> bool {
+    patch
+        .as_object()
+        .is_some_and(|o| ENGINE_AFFECTING_KEYS.iter().any(|k| o.contains_key(*k)))
+}
+
+fn clear_engine_cache<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(state) = app.try_state::<crate::app::AppState>() {
+        state.clear_engine();
+    }
+}
+
+fn emit_settings<R: Runtime>(app: &AppHandle<R>, next: &Settings) {
+    if let Err(e) = app.emit(EV_SETTINGS_UPDATED, next.clone()) {
+        tracing::warn!(?e, "emit settings:updated failed");
+    }
 }
 
 #[tauri::command]
@@ -100,11 +128,30 @@ pub async fn open_system_settings(kind: PermissionKind) -> AppResult<()> {
     Ok(())
 }
 
-/// Open an arbitrary path in the user's default handler. Used by the About
-/// tab to surface the log file (Phase 9 wires the writer; the path link
-/// works today and shows an empty file).
+/// Open an allow-listed URL or app-owned path in the user's default handler.
+/// Used by the About tab (releases page, log file).
+///
+/// The webview is not trusted to open arbitrary targets: only
+/// - `https://github.com/irfanfaraaz/dictateflow[/...]`
+/// - `https://elevenlabs.io[/...]` (and its subdomains)
+/// - `x-apple.systempreferences:` deep links
+/// - existing paths inside the app log dir or the models dir
+///
+/// are accepted; anything else is rejected with an error.
 #[tauri::command]
-pub async fn open_path(path: String) -> AppResult<()> {
+pub async fn open_path<R: Runtime>(app: AppHandle<R>, path: String) -> AppResult<()> {
+    let mut allowed_dirs = Vec::new();
+    if let Ok(d) = log_dir(&app) {
+        allowed_dirs.push(d);
+    }
+    if let Some(d) = crate::models::models_dir(&app) {
+        allowed_dirs.push(d);
+    }
+    if !open_target_allowed(&path, &allowed_dirs) {
+        tracing::warn!(target = %path, "open_path rejected non-allow-listed target");
+        return Err(anyhow::anyhow!("refusing to open {path}: not an allowed location").into());
+    }
+
     // `std::process::Command::new("open")` is the canonical mac shell-out
     // for "do whatever the user has registered for this URI/path." Tauri
     // ships its own `shell` plugin for the same job, but we don't want to
@@ -117,6 +164,52 @@ pub async fn open_path(path: String) -> AppResult<()> {
         return Err(anyhow::anyhow!("`open {path}` exited with {status}").into());
     }
     Ok(())
+}
+
+/// Allow-list check for [`open_path`]. Absolute paths must exist and resolve
+/// (after symlinks / `..`) inside one of `allowed_dirs`; everything else must
+/// be an allow-listed URL.
+fn open_target_allowed(target: &str, allowed_dirs: &[std::path::PathBuf]) -> bool {
+    if target.starts_with('/') {
+        let Ok(resolved) = std::fs::canonicalize(target) else {
+            return false;
+        };
+        return allowed_dirs.iter().any(|dir| {
+            std::fs::canonicalize(dir)
+                .map(|d| resolved.starts_with(d))
+                .unwrap_or(false)
+        });
+    }
+    url_allowed(target)
+}
+
+fn url_allowed(target: &str) -> bool {
+    let Ok(url) = url::Url::parse(target) else {
+        return false;
+    };
+    match url.scheme() {
+        "x-apple.systempreferences" => true,
+        "https" => {
+            if !url.username().is_empty() || url.password().is_some() || url.port().is_some() {
+                return false;
+            }
+            match url.host_str() {
+                Some("github.com") => {
+                    let p = url.path();
+                    p == "/irfanfaraaz/dictateflow" || p.starts_with("/irfanfaraaz/dictateflow/")
+                }
+                Some(h) => h == "elevenlabs.io" || h.ends_with(".elevenlabs.io"),
+                None => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// `~/Library/Logs/dictateflow` — where `tracing-appender` writes.
+fn log_dir<R: Runtime>(app: &AppHandle<R>) -> anyhow::Result<std::path::PathBuf> {
+    let home = app.path().home_dir().context("resolve home dir")?;
+    Ok(home.join("Library/Logs/dictateflow"))
 }
 
 /// Save the ElevenLabs API key to the macOS Keychain and set
@@ -137,18 +230,21 @@ pub async fn set_api_key<R: Runtime>(
         .map_err(|e| anyhow::anyhow!("keychain set: {e}"))?;
 
     // Persist the flag (not the secret) in settings.json, then notify the UI.
+    // Storing a key is a "setup done" moment: if Scribe is the selected
+    // engine the app is now usable, so later launches can start in the tray.
     let next = store
-        .update_patch(&app, json!({"scribe": {"has_api_key": true}}))
+        .update_with(&app, |s| {
+            s.scribe.has_api_key = true;
+            if s.engine == crate::settings::schema::EngineKind::Scribe {
+                s.first_run_completed = true;
+            }
+        })
         .context("update settings after set_api_key")?;
 
     // Clear any cached Scribe engine so the next dictation picks up the new key.
-    if let Some(state) = app.try_state::<crate::app::AppState>() {
-        state.clear_engine();
-    }
+    clear_engine_cache(&app);
 
-    if let Err(e) = app.emit(EV_SETTINGS_UPDATED, next) {
-        tracing::warn!(?e, "emit settings:updated after set_api_key failed");
-    }
+    emit_settings(&app, &next);
     Ok(())
 }
 
@@ -162,17 +258,13 @@ pub async fn clear_api_key<R: Runtime>(
         .map_err(|e| anyhow::anyhow!("keychain delete: {e}"))?;
 
     let next = store
-        .update_patch(&app, json!({"scribe": {"has_api_key": false}}))
+        .update_with(&app, |s| s.scribe.has_api_key = false)
         .context("update settings after clear_api_key")?;
 
     // Evict cached Scribe engine.
-    if let Some(state) = app.try_state::<crate::app::AppState>() {
-        state.clear_engine();
-    }
+    clear_engine_cache(&app);
 
-    if let Err(e) = app.emit(EV_SETTINGS_UPDATED, next) {
-        tracing::warn!(?e, "emit settings:updated after clear_api_key failed");
-    }
+    emit_settings(&app, &next);
     Ok(())
 }
 
@@ -214,8 +306,14 @@ pub async fn download_model<R: Runtime>(id: String, app: AppHandle<R>) -> AppRes
     };
     use crate::models;
 
+    // Resolve everything fallible BEFORE claiming the per-id slot, so an
+    // early error can't leave a token behind (which would turn every later
+    // download of this id into a silent no-op).
+    let models_dir = models::models_dir(&app)
+        .ok_or_else(|| anyhow::anyhow!("could not resolve app data dir"))?;
+
     // Guard: one download per model id.
-    {
+    let cancel = {
         let state = app
             .try_state::<AppState>()
             .ok_or_else(|| anyhow::anyhow!("AppState missing"))?;
@@ -228,35 +326,21 @@ pub async fn download_model<R: Runtime>(id: String, app: AppHandle<R>) -> AppRes
             return Ok(());
         }
         let token = CancellationToken::new();
-        tokens.insert(id.clone(), token);
-    }
-
-    let models_dir = models::models_dir(&app)
-        .ok_or_else(|| anyhow::anyhow!("could not resolve app data dir"))?;
+        tokens.insert(id.clone(), token.clone());
+        token
+    };
+    // From here on the slot is released on every exit path (including a
+    // panic inside the task) when the guard drops.
+    let slot = DownloadSlot {
+        app: app.clone(),
+        id: id.clone(),
+    };
 
     // Clone what the task needs; AppHandle is cheap to clone (Arc inside).
     let app2 = app.clone();
     let id2 = id.clone();
 
     tokio::spawn(async move {
-        let cancel = {
-            let state = match app2.try_state::<AppState>() {
-                Some(s) => s,
-                None => {
-                    tracing::warn!("AppState missing in download task");
-                    return;
-                }
-            };
-            let tokens = match state.download_tokens.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            match tokens.get(&id2) {
-                Some(t) => t.clone(),
-                None => return, // token was already removed (race with cancel)
-            }
-        };
-
         let app_clone = app2.clone();
         let id_clone = id2.clone();
         let result = crate::models::download::download(
@@ -276,30 +360,46 @@ pub async fn download_model<R: Runtime>(id: String, app: AppHandle<R>) -> AppRes
         )
         .await;
 
-        // Remove token regardless of outcome.
-        if let Some(state) = app2.try_state::<AppState>() {
-            let mut tokens = match state.download_tokens.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            tokens.remove(&id2);
-        }
+        // Release the per-id slot before notifying the UI, so a retry
+        // triggered by the event isn't rejected as "already downloading".
+        drop(slot);
 
         match result {
             Ok(_path) => {
                 // Sync installed_models in settings so the Engine tab picker
                 // and the Models tab both see the new model immediately.
+                // Atomic read-modify-write: concurrent completions can't
+                // drop each other's ids.
                 if let Some(store) = app2.try_state::<crate::settings::SettingsStore>() {
-                    let settings = store.get();
-                    let mut installed = settings.local.installed_models.clone();
-                    if !installed.contains(&id2) {
-                        installed.push(id2.clone());
-                    }
-                    // Sort for stability.
-                    installed.sort();
-                    let patch = json!({"local": {"installed_models": installed}});
-                    if let Ok(next) = store.update_patch(&app2, patch) {
-                        let _ = app2.emit(EV_SETTINGS_UPDATED, next);
+                    let mut model_changed = false;
+                    let res = store.update_with(&app2, |s| {
+                        let installed = &mut s.local.installed_models;
+                        if !installed.contains(&id2) {
+                            installed.push(id2.clone());
+                        }
+                        // Sort for stability.
+                        installed.sort();
+                        // If the active model isn't actually installed (e.g.
+                        // default "small" while the user fetched "tiny"),
+                        // switch to the one that just arrived.
+                        if !s.local.installed_models.contains(&s.local.model) {
+                            s.local.model = id2.clone();
+                            model_changed = true;
+                        }
+                        if s.engine == crate::settings::schema::EngineKind::Local {
+                            s.first_run_completed = true;
+                        }
+                    });
+                    match res {
+                        Ok(next) => {
+                            if model_changed {
+                                clear_engine_cache(&app2);
+                            }
+                            emit_settings(&app2, &next);
+                        }
+                        Err(e) => {
+                            tracing::error!(?e, id = %id2, "persist installed_models failed");
+                        }
                     }
                 }
                 let _ = app2.emit(
@@ -308,21 +408,43 @@ pub async fn download_model<R: Runtime>(id: String, app: AppHandle<R>) -> AppRes
                 );
             }
             Err(e) => {
-                // Cancelled is not an error worth surfacing.
-                if !matches!(e, crate::models::download::DownloadError::Cancelled) {
-                    let _ = app2.emit(
-                        EV_MODEL_DOWNLOAD_ERROR,
-                        ModelDownloadErrorPayload {
-                            id: id2,
-                            message: e.to_string(),
-                        },
-                    );
-                }
+                // Cancellation is reported with the sentinel message
+                // "cancelled" so the frontend can reset its progress UI
+                // without showing an error.
+                let message = if matches!(e, crate::models::download::DownloadError::Cancelled) {
+                    "cancelled".to_string()
+                } else {
+                    tracing::warn!(error = %e, id = %id2, "model download failed");
+                    e.to_string()
+                };
+                let _ = app2.emit(
+                    EV_MODEL_DOWNLOAD_ERROR,
+                    ModelDownloadErrorPayload { id: id2, message },
+                );
             }
         }
     });
 
     Ok(())
+}
+
+/// Scope guard for a claimed `download_tokens` slot: removes the id's token
+/// when dropped, whatever path the download took.
+struct DownloadSlot<R: Runtime> {
+    app: AppHandle<R>,
+    id: String,
+}
+
+impl<R: Runtime> Drop for DownloadSlot<R> {
+    fn drop(&mut self) {
+        if let Some(state) = self.app.try_state::<crate::app::AppState>() {
+            let mut tokens = match state.download_tokens.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            tokens.remove(&self.id);
+        }
+    }
 }
 
 /// Cancel an in-progress model download by id. No-op if none is running.
@@ -359,29 +481,25 @@ pub async fn delete_model<R: Runtime>(
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    // Sync installed_models in settings.
-    let settings = store.get();
-    let installed: Vec<String> = settings
-        .local
-        .installed_models
-        .into_iter()
-        .filter(|m| m != &id)
-        .collect();
-
-    // If active model was deleted, reset to first installed or leave as-is
-    // (engine will return ModelNotInstalled on next dictation — handled there).
+    // Sync installed_models in settings (atomic read-modify-write). If the
+    // active model was deleted, switch to the best remaining installed model
+    // (if none remain, leave it — the engine reports ModelNotInstalled and
+    // the UI prompts for a download).
     let next = store
-        .update_patch(&app, json!({"local": {"installed_models": installed}}))
+        .update_with(&app, |s| {
+            s.local.installed_models.retain(|m| m != &id);
+            if s.local.model == id {
+                if let Some(best) = models::catalog::best_installed(&s.local.installed_models) {
+                    s.local.model = best.to_string();
+                }
+            }
+        })
         .context("sync installed_models after delete")?;
 
     // Clear engine cache so the next dictation doesn't try to use a gone file.
-    if let Some(state) = app.try_state::<crate::app::AppState>() {
-        state.clear_engine();
-    }
+    clear_engine_cache(&app);
 
-    if let Err(e) = app.emit(EV_SETTINGS_UPDATED, next) {
-        tracing::warn!(?e, "emit settings:updated after delete_model failed");
-    }
+    emit_settings(&app, &next);
     // Signal the frontend models tab to refresh.
     let _ = app.emit(
         EV_MODEL_DOWNLOAD_COMPLETE,
@@ -415,8 +533,7 @@ pub async fn resolve_log_path<R: Runtime>(app: AppHandle<R>) -> AppResult<String
     // `~/Library/Logs/dictateflow/dictateflow.log`. The directory is created
     // on first call so `open` doesn't fail with ENOENT before Phase 9 wires
     // the writer.
-    let home = app.path().home_dir().context("resolve home dir")?;
-    let log_dir = home.join("Library/Logs/dictateflow");
+    let log_dir = log_dir(&app)?;
     if let Err(e) = std::fs::create_dir_all(&log_dir) {
         tracing::warn!(?e, "create log dir failed (non-fatal)");
     }
@@ -437,8 +554,7 @@ pub async fn resolve_log_path<R: Runtime>(app: AppHandle<R>) -> AppResult<String
 /// dated log files without needing to know the current date suffix.
 #[tauri::command]
 pub async fn open_log_dir<R: Runtime>(app: AppHandle<R>) -> AppResult<()> {
-    let home = app.path().home_dir().context("resolve home dir")?;
-    let log_dir = home.join("Library/Logs/dictateflow");
+    let log_dir = log_dir(&app)?;
     if let Err(e) = std::fs::create_dir_all(&log_dir) {
         tracing::warn!(?e, "create log dir failed (non-fatal)");
     }
@@ -497,4 +613,76 @@ pub async fn list_input_devices() -> AppResult<Vec<InputDeviceInfo>> {
         .collect();
 
     Ok(devices)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn allowed_urls() {
+        assert!(url_allowed(
+            "https://github.com/irfanfaraaz/dictateflow/releases"
+        ));
+        assert!(url_allowed("https://github.com/irfanfaraaz/dictateflow"));
+        assert!(url_allowed("https://elevenlabs.io/app/settings/api-keys"));
+        assert!(url_allowed(
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+        ));
+    }
+
+    #[test]
+    fn rejected_urls() {
+        assert!(!url_allowed(
+            "https://github.com/irfanfaraaz/dictateflow-evil"
+        ));
+        assert!(!url_allowed("https://github.com/someone/else"));
+        assert!(!url_allowed("http://github.com/irfanfaraaz/dictateflow"));
+        assert!(!url_allowed("https://elevenlabs.io.evil.com/"));
+        assert!(!url_allowed("https://user@elevenlabs.io/"));
+        assert!(!url_allowed("file:///etc/passwd"));
+        assert!(!url_allowed("javascript:alert(1)"));
+        assert!(!url_allowed("/Applications/Calculator.app"));
+        assert!(!url_allowed("-a Terminal"));
+    }
+
+    #[test]
+    fn paths_must_be_inside_allowed_dirs() {
+        let base = std::env::temp_dir().join(format!("df-open-test-{}", std::process::id()));
+        let allowed = base.join("logs");
+        let other = base.join("other");
+        std::fs::create_dir_all(&allowed).expect("mkdir allowed");
+        std::fs::create_dir_all(&other).expect("mkdir other");
+        let inside = allowed.join("dictateflow.log");
+        let outside = other.join("x.log");
+        std::fs::write(&inside, "").expect("write inside");
+        std::fs::write(&outside, "").expect("write outside");
+        let dirs = [allowed.clone()];
+
+        let s = |p: &std::path::Path| p.to_string_lossy().into_owned();
+        assert!(open_target_allowed(&s(&inside), &dirs));
+        assert!(open_target_allowed(&s(&allowed), &dirs));
+        assert!(!open_target_allowed(&s(&outside), &dirs));
+        // `..` traversal is resolved before the prefix check.
+        let sneaky = format!("{}/../other/x.log", s(&allowed));
+        assert!(!open_target_allowed(&sneaky, &dirs));
+        // Non-existent paths are rejected.
+        assert!(!open_target_allowed(&s(&allowed.join("nope")), &dirs));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn engine_invalidation_keys() {
+        assert!(patch_invalidates_engine(&json!({"engine": "scribe"})));
+        assert!(patch_invalidates_engine(
+            &json!({"local": {"model": "tiny"}})
+        ));
+        assert!(patch_invalidates_engine(&json!({"language": "de"})));
+        assert!(!patch_invalidates_engine(
+            &json!({"pill": {"follow_cursor": false}})
+        ));
+        assert!(!patch_invalidates_engine(&json!("nonsense")));
+    }
 }

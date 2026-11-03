@@ -7,8 +7,6 @@
     "core:default",
     "core:window:default",
     "core:webview:default",
-    "core:event:default",
-    "store:default",
-    "global-shortcut:default"
+    "core:event:default"
   ]
 }
