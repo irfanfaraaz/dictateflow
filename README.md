@@ -4,6 +4,8 @@ Voice dictation for macOS — speak into any app, get text. Built with Rust + Ta
 
 Press a hotkey, talk, release. Your speech is transcribed via ElevenLabs Scribe v2 and pasted into whatever app has focus. A minimal floating waveform bubble shows at the bottom of your screen while recording.
 
+https://github.com/user-attachments/assets/5edc93d7-3208-4905-bbb8-9e750da79cc0
+
 ## Download
 
 ### Recommended: one-line install (no Gatekeeper prompt)
