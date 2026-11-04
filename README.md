@@ -1,10 +1,19 @@
 # DictateFlow
 
+[![CI](https://github.com/irfanfaraaz/dictateflow/actions/workflows/ci.yml/badge.svg)](https://github.com/irfanfaraaz/dictateflow/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/irfanfaraaz/dictateflow)](https://github.com/irfanfaraaz/dictateflow/releases/latest)
+[![Licence: AGPL-3.0](https://img.shields.io/badge/licence-AGPL--3.0-blue)](LICENSE)
+![macOS on Apple Silicon](https://img.shields.io/badge/macOS-Apple%20Silicon-lightgrey)
+
 Voice dictation for macOS — speak into any app, get text. Built with Rust + Tauri 2.
 
 Press a hotkey, talk, release. Your speech is transcribed via ElevenLabs Scribe v2 and pasted into whatever app has focus. A minimal floating waveform bubble shows at the bottom of your screen while recording.
 
 https://github.com/user-attachments/assets/5edc93d7-3208-4905-bbb8-9e750da79cc0
+
+<sub>Music in the demo: "Happy Beats / Business Moves Vol. 10" by Sascha Ende, [ende.app](https://ende.app/en) ([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)).</sub>
+
+**Contents:** [Download](#download) · [Setup](#setup) · [Usage](#usage) · [Stack](#stack) · [Development](#development) · [Notes](#notes) · [Contributing](#contributing) · [Licence](#licence)
 
 ## Download
 
@@ -84,6 +93,8 @@ After granting Accessibility, **quit and relaunch** the app (macOS caches the gr
 4. Release the hotkey (or press again in toggle mode)
 5. Text is pasted into the focused app
 
+<p align="center"><img src="docs/media/dictateflow-demo.gif" width="620" alt="Holding F5 brings up the DictateFlow pill with a live waveform; on release the spoken sentence is pasted into the editor."></p>
+
 ## Stack
 
 | Concern | Choice |
@@ -121,6 +132,10 @@ Logs are written to `~/Library/Logs/dictateflow/dictateflow.log.*`.
 - **Permissions surviving updates**: macOS ties Accessibility and Keychain access to the app's code signature. Releases are signed with a stable self-signed certificate (set up once with `scripts/setup-signing.sh`, which stores it as the `MACOS_SIGNING_P12` / `MACOS_SIGNING_P12_PASSWORD` repo secrets), so grants carry over between versions. Without those secrets, builds are ad-hoc signed and you must re-grant Accessibility after every update (remove DictateFlow with −, add it again with +, relaunch). Local `pnpm tauri build` builds are ad-hoc signed too.
 - **Local Whisper engine**: Available but requires downloading a GGML model in Settings → Models. ElevenLabs Scribe is the primary engine.
 
-## License
+## Contributing
 
-Private — not yet licensed for distribution.
+Bug reports, ideas and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and the checks CI runs, and [CHANGELOG.md](CHANGELOG.md) for what changed in each release. Please report security issues privately as described in [SECURITY.md](SECURITY.md). Everyone taking part follows the [code of conduct](CODE_OF_CONDUCT.md).
+
+## Licence
+
+[AGPL-3.0](LICENSE). You can use, change and share DictateFlow, but if you distribute a changed version, you must release its source under the same licence.
