@@ -1,0 +1,53 @@
+name: Bug report
+description: Something in DictateFlow doesn't work as described.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead. Include the message the pill showed, if any.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Focus a text field in Notes
+        2. Hold F5 and say a sentence
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: DictateFlow version
+      description: Settings → About.
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and Mac
+      placeholder: macOS 15.1, MacBook Air M2
+    validations:
+      required: true
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Engine
+      options:
+        - ElevenLabs Scribe v2
+        - Local Whisper
+  - type: input
+    id: mic
+    attributes:
+      label: Microphone
+      placeholder: Built-in, AirPods, USB mic…
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: The relevant lines from `~/Library/Logs/dictateflow/`. Remove your API key and anything private.
+      render: text
